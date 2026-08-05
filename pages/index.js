@@ -97,6 +97,10 @@ export default function Home() {
     await supabase.from("students").delete().eq("id", id);
     setStudents((prev) => prev.filter((s) => s.id !== id));
   };
+  const updateStudent = async (id, patch) => {
+    const { data } = await supabase.from("students").update(patch).eq("id", id).select().maybeSingle();
+    setStudents((prev) => prev.map((s) => (s.id === id ? (data || { ...s, ...patch }) : s)).sort((x, y) => x.name.localeCompare(y.name)));
+  };
 
   // ---- Gruppen ----
   const addGroup = async (name, weekday, time, duration) => {
@@ -207,7 +211,7 @@ export default function Home() {
         />
       )}
       {tab === "schueler" && (
-        <StudentsTab students={students} groups={groups} onAdd={addStudent} onDelete={delStudent} />
+        <StudentsTab students={students} groups={groups} onAdd={addStudent} onDelete={delStudent} onUpdate={updateStudent} />
       )}
       {tab === "gruppen" && (
         <GroupsTab groups={groups} students={students} onAdd={addGroup} onDelete={delGroup} />
@@ -251,10 +255,12 @@ function Nav({ tab, setTab }) {
   );
 }
 
-function StudentsTab({ students, groups, onAdd, onDelete }) {
+function StudentsTab({ students, groups, onAdd, onDelete, onUpdate }) {
   const [name, setName] = useState("");
   const [groupId, setGroupId] = useState("");
   const [isSchoolchild, setIsSchoolchild] = useState(true);
+  const [editingId, setEditingId] = useState(null);
+
   return (
     <div>
       <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Schüler anlegen</div>
@@ -274,18 +280,46 @@ function StudentsTab({ students, groups, onAdd, onDelete }) {
       <div className="net-divider" />
       <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Alle Schüler ({students.length})</div>
       {students.length === 0 && <div className="empty">Noch keine Schüler angelegt.</div>}
-      {students.map((s) => {
-        const g = groups.find((g) => g.id === s.group_id);
-        return (
+      {students.map((s) =>
+        editingId === s.id ? (
+          <EditStudentCard key={s.id} student={s} groups={groups} onCancel={() => setEditingId(null)}
+            onSave={(patch) => { onUpdate(s.id, patch); setEditingId(null); }} />
+        ) : (
           <div key={s.id} className="card row" style={{ marginBottom: 8 }}>
             <div>
               <div style={{ fontWeight: 500 }}>{s.name}</div>
-              <div className="tag">{g ? g.name : "— keine Gruppe —"} · {s.is_schoolchild ? "Schüler" : "Kein Schüler"}</div>
+              <div className="tag">{(groups.find((g) => g.id === s.group_id)?.name) || "— keine Gruppe —"} · {s.is_schoolchild ? "Schüler" : "Kein Schüler"}</div>
             </div>
-            <button className="icon-btn" onClick={() => onDelete(s.id)}>✕</button>
+            <div className="gap2">
+              <button className="icon-btn" style={{ color: "var(--chalk-dim)" }} onClick={() => setEditingId(s.id)}>✎</button>
+              <button className="icon-btn" onClick={() => onDelete(s.id)}>✕</button>
+            </div>
           </div>
-        );
-      })}
+        )
+      )}
+    </div>
+  );
+}
+
+function EditStudentCard({ student, groups, onSave, onCancel }) {
+  const [name, setName] = useState(student.name);
+  const [groupId, setGroupId] = useState(student.group_id || "");
+  const [isSchoolchild, setIsSchoolchild] = useState(!!student.is_schoolchild);
+  return (
+    <div className="card col" style={{ marginBottom: 8, borderColor: "var(--ball)" }}>
+      <input placeholder="Name des Schülers" value={name} onChange={(e) => setName(e.target.value)} />
+      <select value={groupId} onChange={(e) => setGroupId(e.target.value)}>
+        <option value="">— keine Gruppe —</option>
+        {groups.map((g) => <option key={g.id} value={g.id}>{groupLabel(g)}</option>)}
+      </select>
+      <label className="row" style={{ cursor: "pointer" }}>
+        <span className="tag" style={{ fontSize: 13, textTransform: "none", letterSpacing: 0 }}>Geht noch zur Schule (betrifft Ferienregelung)</span>
+        <input type="checkbox" style={{ width: "auto" }} checked={isSchoolchild} onChange={(e) => setIsSchoolchild(e.target.checked)} />
+      </label>
+      <div className="gap2">
+        <button className="btn-primary" style={{ flex: 1 }} onClick={() => onSave({ name: name.trim(), group_id: groupId || null, is_schoolchild: isSchoolchild })}>Speichern</button>
+        <button className="btn-primary" style={{ flex: 1, background: "var(--surface2)", color: "var(--chalk)" }} onClick={onCancel}>Abbrechen</button>
+      </div>
     </div>
   );
 }
