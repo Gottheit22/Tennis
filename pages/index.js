@@ -13,6 +13,25 @@ const isoDate = (d) => {
 function groupLabel(g) {
   return `${g.name} — ${WEEKDAYS[g.weekday]} ${g.time}`;
 }
+
+// Offizielle bayerische Schulferien (Kultusministerium). Muss jährlich ergänzt werden,
+// sobald neue Termine veröffentlicht sind: https://www.km.bayern.de/termine/ferien-und-feiertage
+const BAVARIAN_HOLIDAYS = [
+  ["2026-02-16", "2026-02-20"], // Faschingsferien 2026
+  ["2026-03-30", "2026-04-10"], // Osterferien 2026
+  ["2026-05-26", "2026-06-05"], // Pfingstferien 2026
+  ["2026-08-01", "2026-09-14"], // Sommerferien 2026
+  ["2026-11-02", "2026-11-06"], // Herbstferien 2026
+  ["2026-12-24", "2027-01-08"], // Weihnachtsferien 2026/2027
+  ["2027-02-08", "2027-02-12"], // Faschingsferien 2027
+  ["2027-03-22", "2027-04-02"], // Osterferien 2027
+  ["2027-05-18", "2027-05-28"], // Pfingstferien 2027
+  ["2027-08-02", "2027-09-13"], // Sommerferien 2027
+];
+function isBavarianHoliday(dateIso) {
+  return BAVARIAN_HOLIDAYS.some(([start, end]) => dateIso >= start && dateIso <= end);
+}
+
 function datesForMonth(year, monthIdx, weekday) {
   const dates = [];
   const d = new Date(year, monthIdx, 1);
@@ -69,9 +88,9 @@ export default function Home() {
   }, [groups]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- Schüler ----
-  const addStudent = async (name, groupId) => {
+  const addStudent = async (name, groupId, isSchoolchild) => {
     if (!name.trim()) return;
-    const { data } = await supabase.from("students").insert({ name: name.trim(), group_id: groupId || null }).select();
+    const { data } = await supabase.from("students").insert({ name: name.trim(), group_id: groupId || null, is_schoolchild: isSchoolchild }).select();
     if (data) setStudents((prev) => [...prev, ...data].sort((x, y) => x.name.localeCompare(y.name)));
   };
   const delStudent = async (id) => {
@@ -122,15 +141,38 @@ export default function Home() {
     const group = groups.find((g) => g.id === groupId);
     if (!group) return;
     const dates = datesForMonth(year, monthIdx, group.weekday);
-    const heldCount = dates.filter((d) => {
-      const entry = attendance[`${groupId}__${isoDate(d)}`];
-      return !(entry && entry.cancelled);
-    }).length;
     const groupStudents = students.filter((s) => s.group_id === groupId);
     const studentCount = groupStudents.length;
-    const pricePerTrainingPerStudent = studentCount > 0 ? (HOURLY_RATE * (group.duration / 60)) / studentCount : 0;
-    const perStudentTotal = pricePerTrainingPerStudent * heldCount;
-    const total = perStudentTotal * studentCount;
+    const slotCost = HOURLY_RATE * (group.duration / 60);
+    const flatShare = studentCount > 0 ? slotCost / studentCount : 0;
+
+    const totals = {};
+    groupStudents.forEach((s) => { totals[s.id] = 0; });
+    let heldCount = 0;
+    let holidayCount = 0;
+
+    dates.forEach((d) => {
+      const dateIso = isoDate(d);
+      const entry = attendance[`${groupId}__${dateIso}`] || { cancelled: false, present: {} };
+      if (entry.cancelled) return;
+      heldCount++;
+      if (isBavarianHoliday(dateIso)) {
+        holidayCount++;
+        // Nicht-Schulkinder zahlen weiterhin den normalen Pauschalanteil.
+        groupStudents.filter((s) => !s.is_schoolchild).forEach((s) => { totals[s.id] += flatShare; });
+        // Schulkinder teilen sich die Kosten nur unter den tatsächlich Anwesenden.
+        const attendingSchoolchildren = groupStudents.filter((s) => s.is_schoolchild && entry.present[s.id]);
+        if (attendingSchoolchildren.length > 0) {
+          const share = slotCost / attendingSchoolchildren.length;
+          attendingSchoolchildren.forEach((s) => { totals[s.id] += share; });
+        }
+      } else {
+        groupStudents.forEach((s) => { totals[s.id] += flatShare; });
+      }
+    });
+
+    const studentsOut = groupStudents.map((s) => ({ id: s.id, name: s.name, total: totals[s.id] }));
+    const total = studentsOut.reduce((sum, s) => sum + s.total, 0);
 
     const record = {
       group_id: groupId,
@@ -138,10 +180,10 @@ export default function Home() {
       year,
       month_idx: monthIdx,
       held_count: heldCount,
-      price_per_training_per_student: pricePerTrainingPerStudent,
-      per_student_total: perStudentTotal,
+      holiday_count: holidayCount,
+      price_per_training_per_student: flatShare,
       total,
-      students: groupStudents.map((s) => ({ id: s.id, name: s.name })),
+      students: studentsOut,
     };
     const { data } = await supabase.from("invoices").insert(record).select().maybeSingle();
     const invoice = data || { ...record, generated_at: new Date().toISOString() };
@@ -212,6 +254,7 @@ function Nav({ tab, setTab }) {
 function StudentsTab({ students, groups, onAdd, onDelete }) {
   const [name, setName] = useState("");
   const [groupId, setGroupId] = useState("");
+  const [isSchoolchild, setIsSchoolchild] = useState(true);
   return (
     <div>
       <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Schüler anlegen</div>
@@ -221,7 +264,11 @@ function StudentsTab({ students, groups, onAdd, onDelete }) {
           <option value="">— keine Gruppe —</option>
           {groups.map((g) => <option key={g.id} value={g.id}>{groupLabel(g)}</option>)}
         </select>
-        <button className="btn-primary" onClick={() => { onAdd(name, groupId); setName(""); }}>+ Schüler hinzufügen</button>
+        <label className="row" style={{ cursor: "pointer" }}>
+          <span className="tag" style={{ fontSize: 13, textTransform: "none", letterSpacing: 0 }}>Geht noch zur Schule (betrifft Ferienregelung)</span>
+          <input type="checkbox" style={{ width: "auto" }} checked={isSchoolchild} onChange={(e) => setIsSchoolchild(e.target.checked)} />
+        </label>
+        <button className="btn-primary" onClick={() => { onAdd(name, groupId, isSchoolchild); setName(""); }}>+ Schüler hinzufügen</button>
         {groups.length === 0 && <div className="tag" style={{ color: "var(--clay)" }}>Lege zuerst eine Gruppe an (Tab „Gruppen").</div>}
       </div>
       <div className="net-divider" />
@@ -233,7 +280,7 @@ function StudentsTab({ students, groups, onAdd, onDelete }) {
           <div key={s.id} className="card row" style={{ marginBottom: 8 }}>
             <div>
               <div style={{ fontWeight: 500 }}>{s.name}</div>
-              <div className="tag">{g ? g.name : "— keine Gruppe —"}</div>
+              <div className="tag">{g ? g.name : "— keine Gruppe —"} · {s.is_schoolchild ? "Schüler" : "Kein Schüler"}</div>
             </div>
             <button className="icon-btn" onClick={() => onDelete(s.id)}>✕</button>
           </div>
@@ -390,10 +437,13 @@ function InvoiceView({ invoice, biller }) {
   return (
     <div className="card" style={{ marginTop: 16 }}>
       <div className="disp" style={{ fontSize: 16, marginBottom: 2 }}>{invoice.group_name} — {MONTHS[invoice.month_idx]} {invoice.year}</div>
-      <div className="tag" style={{ marginBottom: 10 }}>{invoice.held_count} stattgefundene Trainings · {fmtEUR(invoice.price_per_training_per_student)} pro Schüler/Training</div>
+      <div className="tag" style={{ marginBottom: 10 }}>
+        {invoice.held_count} stattgefundene Trainings · {fmtEUR(invoice.price_per_training_per_student)} regulär pro Schüler/Training
+        {invoice.holiday_count > 0 && <> · davon {invoice.holiday_count} in den Ferien (abweichende Abrechnung)</>}
+      </div>
       <div className="net-divider" style={{ margin: "10px 0" }} />
       {(invoice.students || []).map((s) => (
-        <div key={s.id} className="row" style={{ margin: "6px 0" }}><span>{s.name}</span><span className="disp">{fmtEUR(invoice.per_student_total)}</span></div>
+        <div key={s.id} className="row" style={{ margin: "6px 0" }}><span>{s.name}</span><span className="disp">{fmtEUR(s.total)}</span></div>
       ))}
       <div className="net-divider" style={{ margin: "10px 0" }} />
       <div className="row"><span className="disp" style={{ fontSize: 16 }}>Gesamt</span><span className="disp" style={{ fontSize: 18, color: "var(--ball)" }}>{fmtEUR(invoice.total)}</span></div>
@@ -436,17 +486,17 @@ function downloadInvoicePdf(inv, biller) {
       doc.setFont("helvetica", "normal");
       doc.text(`Tennistraining, Gruppe „${inv.group_name}"`, 20, y);
       doc.text(String(inv.held_count), 122, y);
-      doc.text(fmtEUR(inv.per_student_total), 170, y);
+      doc.text(fmtEUR(s.total), 170, y);
       y += 6;
       doc.setFontSize(9); doc.setTextColor(120);
-      doc.text(`${fmtEUR(inv.price_per_training_per_student)} pro Training`, 20, y);
+      doc.text(`${fmtEUR(inv.price_per_training_per_student)} regulär pro Training${inv.holiday_count > 0 ? ` · ${inv.holiday_count}x Ferienregelung` : ""}`, 20, y);
       doc.setFontSize(10); doc.setTextColor(0);
       y += 10;
 
       doc.setDrawColor(180); doc.line(20, y, 190, y); y += 10;
       doc.setFont("helvetica", "bold"); doc.setFontSize(12);
       doc.text("Gesamtbetrag", 20, y);
-      doc.text(fmtEUR(inv.per_student_total), 170, y);
+      doc.text(fmtEUR(s.total), 170, y);
       y += 20;
 
       doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(100);
