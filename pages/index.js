@@ -10,6 +10,9 @@ const isoDate = (d) => {
   const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, "0"), day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 };
+function groupLabel(g) {
+  return `${g.name} — ${WEEKDAYS[g.weekday]} ${g.time}`;
+}
 function datesForMonth(year, monthIdx, weekday) {
   const dates = [];
   const d = new Date(year, monthIdx, 1);
@@ -216,7 +219,7 @@ function StudentsTab({ students, groups, onAdd, onDelete }) {
         <input placeholder="Name des Schülers" value={name} onChange={(e) => setName(e.target.value)} />
         <select value={groupId} onChange={(e) => setGroupId(e.target.value)}>
           <option value="">— keine Gruppe —</option>
-          {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+          {groups.map((g) => <option key={g.id} value={g.id}>{groupLabel(g)}</option>)}
         </select>
         <button className="btn-primary" onClick={() => { onAdd(name, groupId); setName(""); }}>+ Schüler hinzufügen</button>
         {groups.length === 0 && <div className="tag" style={{ color: "var(--clay)" }}>Lege zuerst eine Gruppe an (Tab „Gruppen").</div>}
@@ -297,7 +300,7 @@ function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, 
     <div>
       <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Trainingserfassung</div>
       <select value={group.id} onChange={(e) => setGroupId(e.target.value)} style={{ marginBottom: 12 }}>
-        {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+        {groups.map((g) => <option key={g.id} value={g.id}>{groupLabel(g)}</option>)}
       </select>
       <div className="row" style={{ marginBottom: 12 }}>
         <button className="card" style={{ padding: "8px 12px", cursor: "pointer" }} onClick={() => shiftMonth(-1)}>‹</button>
@@ -355,7 +358,7 @@ function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, year, 
       <div className="card col">
         {groups.length === 0 ? <div className="tag">Keine Gruppen vorhanden</div> : (
           <select value={activeGroupId} onChange={(e) => setGroupId(e.target.value)}>
-            {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+            {groups.map((g) => <option key={g.id} value={g.id}>{groupLabel(g)}</option>)}
           </select>
         )}
         <div className="gap2">
