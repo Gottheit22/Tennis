@@ -151,7 +151,9 @@ export default function Home() {
     const flatShare = studentCount > 0 ? slotCost / studentCount : 0;
 
     const totals = {};
-    groupStudents.forEach((s) => { totals[s.id] = 0; });
+    const regularCounts = {};
+    const holidayBilledCounts = {};
+    groupStudents.forEach((s) => { totals[s.id] = 0; regularCounts[s.id] = 0; holidayBilledCounts[s.id] = 0; });
     let heldCount = 0;
     let holidayCount = 0;
 
@@ -163,19 +165,26 @@ export default function Home() {
       if (isBavarianHoliday(dateIso)) {
         holidayCount++;
         // Nicht-Schulkinder zahlen weiterhin den normalen Pauschalanteil.
-        groupStudents.filter((s) => !s.is_schoolchild).forEach((s) => { totals[s.id] += flatShare; });
+        groupStudents.filter((s) => !s.is_schoolchild).forEach((s) => { totals[s.id] += flatShare; regularCounts[s.id] += 1; });
         // Schulkinder teilen sich die Kosten nur unter den tatsächlich Anwesenden.
         const attendingSchoolchildren = groupStudents.filter((s) => s.is_schoolchild && entry.present[s.id]);
         if (attendingSchoolchildren.length > 0) {
           const share = slotCost / attendingSchoolchildren.length;
-          attendingSchoolchildren.forEach((s) => { totals[s.id] += share; });
+          attendingSchoolchildren.forEach((s) => { totals[s.id] += share; holidayBilledCounts[s.id] += 1; });
         }
       } else {
-        groupStudents.forEach((s) => { totals[s.id] += flatShare; });
+        groupStudents.forEach((s) => { totals[s.id] += flatShare; regularCounts[s.id] += 1; });
       }
     });
 
-    const studentsOut = groupStudents.map((s) => ({ id: s.id, name: s.name, total: totals[s.id] }));
+    const studentsOut = groupStudents.map((s) => ({
+      id: s.id,
+      name: s.name,
+      total: totals[s.id],
+      regular_count: regularCounts[s.id],
+      holiday_billed_count: holidayBilledCounts[s.id],
+      holiday_missed_count: holidayCount - holidayBilledCounts[s.id],
+    }));
     const total = studentsOut.reduce((sum, s) => sum + s.total, 0);
 
     const record = {
@@ -467,17 +476,30 @@ function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, year, 
   );
 }
 
+function studentBreakdownText(s, flatShare) {
+  const parts = [`${s.regular_count}x regulär (${fmtEUR(flatShare)})`];
+  if (s.holiday_billed_count > 0) parts.push(`${s.holiday_billed_count}x Ferien besucht`);
+  if (s.holiday_missed_count > 0) parts.push(`${s.holiday_missed_count}x Ferien nicht da (nicht berechnet)`);
+  return parts.join(" · ");
+}
+
 function InvoiceView({ invoice, biller }) {
   return (
     <div className="card" style={{ marginTop: 16 }}>
       <div className="disp" style={{ fontSize: 16, marginBottom: 2 }}>{invoice.group_name} — {MONTHS[invoice.month_idx]} {invoice.year}</div>
       <div className="tag" style={{ marginBottom: 10 }}>
-        {invoice.held_count} stattgefundene Trainings · {fmtEUR(invoice.price_per_training_per_student)} regulär pro Schüler/Training
+        {invoice.held_count} stattgefundene Trainings
         {invoice.holiday_count > 0 && <> · davon {invoice.holiday_count} in den Ferien (abweichende Abrechnung)</>}
       </div>
       <div className="net-divider" style={{ margin: "10px 0" }} />
       {(invoice.students || []).map((s) => (
-        <div key={s.id} className="row" style={{ margin: "6px 0" }}><span>{s.name}</span><span className="disp">{fmtEUR(s.total)}</span></div>
+        <div key={s.id} style={{ margin: "8px 0" }}>
+          <div className="row">
+            <span>{s.name}</span>
+            <span className="disp">{fmtEUR(s.total)}</span>
+          </div>
+          <div className="tag" style={{ fontSize: 10, marginTop: 2 }}>{studentBreakdownText(s, invoice.price_per_training_per_student)}</div>
+        </div>
       ))}
       <div className="net-divider" style={{ margin: "10px 0" }} />
       <div className="row"><span className="disp" style={{ fontSize: 16 }}>Gesamt</span><span className="disp" style={{ fontSize: 18, color: "var(--ball)" }}>{fmtEUR(invoice.total)}</span></div>
@@ -519,11 +541,14 @@ function downloadInvoicePdf(inv, biller) {
 
       doc.setFont("helvetica", "normal");
       doc.text(`Tennistraining, Gruppe „${inv.group_name}"`, 20, y);
-      doc.text(String(inv.held_count), 122, y);
+      doc.text(String((s.regular_count || 0) + (s.holiday_billed_count || 0)), 122, y);
       doc.text(fmtEUR(s.total), 170, y);
       y += 6;
       doc.setFontSize(9); doc.setTextColor(120);
-      doc.text(`${fmtEUR(inv.price_per_training_per_student)} regulär pro Training${inv.holiday_count > 0 ? ` · ${inv.holiday_count}x Ferienregelung` : ""}`, 20, y);
+      const parts = [`${s.regular_count || 0}x regulär (${fmtEUR(inv.price_per_training_per_student)})`];
+      if (s.holiday_billed_count > 0) parts.push(`${s.holiday_billed_count}x Ferien besucht`);
+      if (s.holiday_missed_count > 0) parts.push(`${s.holiday_missed_count}x Ferien nicht da (nicht berechnet)`);
+      doc.text(parts.join(" / "), 20, y);
       doc.setFontSize(10); doc.setTextColor(0);
       y += 10;
 
