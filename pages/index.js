@@ -50,7 +50,7 @@ export default function Home() {
   const [groups, setGroups] = useState([]);
   const [attendance, setAttendance] = useState({}); // key: groupId__date -> {id, cancelled, present}
   const [invoices, setInvoices] = useState([]);
-  const [biller, setBiller] = useState({ name: "", address: "" });
+  const [biller, setBiller] = useState({ name: "", address: "", paymentInfo: "" });
 
   const [trainingGroupId, setTrainingGroupId] = useState(null);
   const [trainingYear, setTrainingYear] = useState(new Date().getFullYear());
@@ -77,7 +77,7 @@ export default function Home() {
     });
     setAttendance(attMap);
     setInvoices(inv.data || []);
-    if (b.data) setBiller({ name: b.data.name || "", address: b.data.address || "" });
+    if (b.data) setBiller({ name: b.data.name || "", address: b.data.address || "", paymentInfo: b.data.payment_info || "" });
     setReady(true);
   }, []);
 
@@ -136,9 +136,9 @@ export default function Home() {
   };
 
   // ---- Rechnung ----
-  const saveBiller = async (name, address) => {
-    setBiller({ name, address });
-    await supabase.from("biller").upsert({ id: 1, name, address });
+  const saveBiller = async (name, address, paymentInfo) => {
+    setBiller({ name, address, paymentInfo });
+    await supabase.from("biller").upsert({ id: 1, name, address, payment_info: paymentInfo });
   };
 
   const generateInvoice = async (groupId, year, monthIdx) => {
@@ -149,42 +149,54 @@ export default function Home() {
     const studentCount = groupStudents.length;
     const slotCost = HOURLY_RATE * (group.duration / 60);
     const flatShare = studentCount > 0 ? slotCost / studentCount : 0;
+    const schoolchildCount = groupStudents.filter((s) => s.is_schoolchild).length;
 
-    const totals = {};
-    const regularCounts = {};
-    const holidayBilledCounts = {};
-    groupStudents.forEach((s) => { totals[s.id] = 0; regularCounts[s.id] = 0; holidayBilledCounts[s.id] = 0; });
+    const charges = {}; // studentId -> [amount, amount, ...] (nur tatsächlich berechnete Termine)
+    groupStudents.forEach((s) => { charges[s.id] = []; });
+    const dateEntries = []; // { dateIso, isHoliday, note }
     let heldCount = 0;
-    let holidayCount = 0;
 
     dates.forEach((d) => {
       const dateIso = isoDate(d);
       const entry = attendance[`${groupId}__${dateIso}`] || { cancelled: false, present: {} };
       if (entry.cancelled) return;
       heldCount++;
-      if (isBavarianHoliday(dateIso)) {
-        holidayCount++;
-        // Nicht-Schulkinder zahlen weiterhin den normalen Pauschalanteil.
-        groupStudents.filter((s) => !s.is_schoolchild).forEach((s) => { totals[s.id] += flatShare; regularCounts[s.id] += 1; });
-        // Schulkinder teilen sich die Kosten nur unter den tatsächlich Anwesenden.
+      const holiday = isBavarianHoliday(dateIso);
+      let note = "";
+      if (holiday) {
+        groupStudents.filter((s) => !s.is_schoolchild).forEach((s) => charges[s.id].push(flatShare));
         const attendingSchoolchildren = groupStudents.filter((s) => s.is_schoolchild && entry.present[s.id]);
         if (attendingSchoolchildren.length > 0) {
           const share = slotCost / attendingSchoolchildren.length;
-          attendingSchoolchildren.forEach((s) => { totals[s.id] += share; holidayBilledCounts[s.id] += 1; });
+          attendingSchoolchildren.forEach((s) => charges[s.id].push(share));
+        }
+        if (schoolchildCount > 0) {
+          note = attendingSchoolchildren.length > 0 ? attendingSchoolchildren.map((s) => s.name).join(", ") : "niemand von den Schulkindern";
         }
       } else {
-        groupStudents.forEach((s) => { totals[s.id] += flatShare; regularCounts[s.id] += 1; });
+        groupStudents.forEach((s) => charges[s.id].push(flatShare));
       }
+      dateEntries.push({ dateIso, holiday, note });
     });
 
-    const studentsOut = groupStudents.map((s) => ({
-      id: s.id,
-      name: s.name,
-      total: totals[s.id],
-      regular_count: regularCounts[s.id],
-      holiday_billed_count: holidayBilledCounts[s.id],
-      holiday_missed_count: holidayCount - holidayBilledCounts[s.id],
-    }));
+    const studentsOut = groupStudents.map((s) => {
+      const amounts = charges[s.id];
+      const total = amounts.reduce((sum, a) => sum + a, 0);
+      // Gleiche Beträge zu "X€ * Anzahl"-Termen zusammenfassen, in Reihenfolge des ersten Auftretens.
+      const order = [];
+      const counts = new Map();
+      amounts.forEach((a) => {
+        const key = Math.round(a * 100);
+        if (!counts.has(key)) { counts.set(key, 0); order.push(key); }
+        counts.set(key, counts.get(key) + 1);
+      });
+      const formula = order.map((key) => {
+        const amount = key / 100;
+        const count = counts.get(key);
+        return count > 1 ? `${fmtEUR(amount)} × ${count}` : fmtEUR(amount);
+      }).join(" + ");
+      return { id: s.id, name: s.name, total, formula: formula || fmtEUR(0) };
+    });
     const total = studentsOut.reduce((sum, s) => sum + s.total, 0);
 
     const record = {
@@ -193,10 +205,10 @@ export default function Home() {
       year,
       month_idx: monthIdx,
       held_count: heldCount,
-      holiday_count: holidayCount,
-      price_per_training_per_student: flatShare,
+      student_count: studentCount,
       total,
       students: studentsOut,
+      dates: dateEntries,
     };
     const { data } = await supabase.from("invoices").insert(record).select().maybeSingle();
     const invoice = data || { ...record, generated_at: new Date().toISOString() };
@@ -434,7 +446,9 @@ function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, 
 function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, year, monthIdx, setYear, setMonthIdx, onGenerate, current, setCurrent, invoices }) {
   const [billerName, setBillerName] = useState(biller.name);
   const [billerAddress, setBillerAddress] = useState(biller.address);
-  useEffect(() => { setBillerName(biller.name); setBillerAddress(biller.address); }, [biller]);
+  const [paymentInfo, setPaymentInfo] = useState(biller.paymentInfo);
+  useEffect(() => { setBillerName(biller.name); setBillerAddress(biller.address); setPaymentInfo(biller.paymentInfo); }, [biller]);
+  const persistBiller = () => onSaveBiller(billerName, billerAddress, paymentInfo);
 
   const activeGroupId = groupId || groups[0]?.id;
 
@@ -442,8 +456,9 @@ function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, year, 
     <div>
       <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Rechnung erstellen</div>
       <div className="card col" style={{ marginBottom: 12 }}>
-        <input placeholder="Dein Name / Firma (für Rechnungskopf)" value={billerName} onChange={(e) => setBillerName(e.target.value)} onBlur={() => onSaveBiller(billerName, billerAddress)} />
-        <input placeholder="Adresse (optional)" value={billerAddress} onChange={(e) => setBillerAddress(e.target.value)} onBlur={() => onSaveBiller(billerName, billerAddress)} />
+        <input placeholder="Dein Name (für Grußformel)" value={billerName} onChange={(e) => setBillerName(e.target.value)} onBlur={persistBiller} />
+        <input placeholder="Adresse (optional)" value={billerAddress} onChange={(e) => setBillerAddress(e.target.value)} onBlur={persistBiller} />
+        <input placeholder="Zahlungsinfo (z. B. PayPal/IBAN)" value={paymentInfo} onChange={(e) => setPaymentInfo(e.target.value)} onBlur={persistBiller} />
       </div>
       <div className="card col">
         {groups.length === 0 ? <div className="tag">Keine Gruppen vorhanden</div> : (
@@ -458,7 +473,7 @@ function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, year, 
           <input type="number" value={year} onChange={(e) => setYear(Number(e.target.value))} style={{ flex: 1 }} />
         </div>
         <button className="btn-primary" disabled={groups.length === 0} onClick={() => onGenerate(activeGroupId, year, monthIdx)}>⬇ PDF-Rechnung erstellen</button>
-        <div className="tag">Erstellt eine PDF mit je einer Seite pro Schüler und lädt sie direkt herunter.</div>
+        <div className="tag">Erstellt eine gemeinsame PDF für die ganze Gruppe und lädt sie direkt herunter.</div>
       </div>
 
       {current && <InvoiceView invoice={current} biller={biller} />}
@@ -476,29 +491,27 @@ function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, year, 
   );
 }
 
-function studentBreakdownText(s, flatShare) {
-  const parts = [`${s.regular_count}x regulär (${fmtEUR(flatShare)})`];
-  if (s.holiday_billed_count > 0) parts.push(`${s.holiday_billed_count}x Ferien besucht`);
-  if (s.holiday_missed_count > 0) parts.push(`${s.holiday_missed_count}x Ferien nicht da (nicht berechnet)`);
-  return parts.join(" · ");
+function dateLabel(dateIso) {
+  const [, m, d] = dateIso.split("-");
+  return `${d}.${m}`;
 }
 
 function InvoiceView({ invoice, biller }) {
+  const dates = invoice.dates || [];
   return (
     <div className="card" style={{ marginTop: 16 }}>
-      <div className="disp" style={{ fontSize: 16, marginBottom: 2 }}>{invoice.group_name} — {MONTHS[invoice.month_idx]} {invoice.year}</div>
-      <div className="tag" style={{ marginBottom: 10 }}>
-        {invoice.held_count} stattgefundene Trainings
-        {invoice.holiday_count > 0 && <> · davon {invoice.holiday_count} in den Ferien (abweichende Abrechnung)</>}
+      <div className="disp" style={{ fontSize: 16, marginBottom: 10 }}>{invoice.group_name} — {MONTHS[invoice.month_idx]} {invoice.year}</div>
+      <div className="tag" style={{ marginBottom: 6 }}>Trainings ({dates.length}):</div>
+      <div style={{ fontSize: 14, marginBottom: 10 }}>
+        {dates.map((d) => (
+          <div key={d.dateIso}>• {dateLabel(d.dateIso)}{d.holiday && d.note ? ` (${d.note})` : ""}</div>
+        ))}
       </div>
       <div className="net-divider" style={{ margin: "10px 0" }} />
       {(invoice.students || []).map((s) => (
-        <div key={s.id} style={{ margin: "8px 0" }}>
-          <div className="row">
-            <span>{s.name}</span>
-            <span className="disp">{fmtEUR(s.total)}</span>
-          </div>
-          <div className="tag" style={{ fontSize: 10, marginTop: 2 }}>{studentBreakdownText(s, invoice.price_per_training_per_student)}</div>
+        <div key={s.id} className="row" style={{ margin: "6px 0" }}>
+          <span>{s.name}: {s.formula}</span>
+          <span className="disp" style={{ whiteSpace: "nowrap", marginLeft: 8 }}>= {fmtEUR(s.total)}</span>
         </div>
       ))}
       <div className="net-divider" style={{ margin: "10px 0" }} />
@@ -511,57 +524,44 @@ function InvoiceView({ invoice, biller }) {
 function downloadInvoicePdf(inv, biller) {
   import("jspdf").then(({ jsPDF }) => {
     const doc = new jsPDF({ unit: "mm", format: "a4" });
-    const students = (inv.students && inv.students.length) ? inv.students : [{ name: "—" }];
-    students.forEach((s, idx) => {
-      if (idx > 0) doc.addPage();
-      let y = 20;
-      doc.setFont("helvetica", "bold"); doc.setFontSize(18);
-      doc.text("RECHNUNG", 20, y); y += 12;
-
-      doc.setFont("helvetica", "normal"); doc.setFontSize(10);
-      if (biller?.name) { doc.text(biller.name, 20, y); y += 5; }
-      if (biller?.address) { doc.text(biller.address, 20, y); y += 5; }
-      y += 6;
-
-      doc.setFont("helvetica", "bold"); doc.setFontSize(11);
-      doc.text("An:", 20, y);
-      doc.setFont("helvetica", "normal");
-      doc.text(s.name, 32, y); y += 10;
-
-      const monthIdx = inv.month_idx ?? inv.monthIdx;
-      doc.setFont("helvetica", "normal"); doc.setFontSize(10);
-      doc.text(`Rechnungsnummer: ${inv.year}${String(monthIdx + 1).padStart(2, "0")}-${(inv.group_name || "").replace(/\s+/g, "").slice(0, 6).toUpperCase()}-${idx + 1}`, 20, y); y += 6;
-      doc.text(`Rechnungsdatum: ${new Date(inv.generated_at || Date.now()).toLocaleDateString("de-DE")}`, 20, y); y += 6;
-      doc.text(`Leistungszeitraum: ${MONTHS[monthIdx]} ${inv.year}`, 20, y); y += 10;
-
-      doc.setDrawColor(180); doc.line(20, y, 190, y); y += 8;
-      doc.setFont("helvetica", "bold");
-      doc.text("Leistung", 20, y); doc.text("Anzahl", 120, y); doc.text("Betrag", 170, y); y += 6;
-      doc.setDrawColor(180); doc.line(20, y, 190, y); y += 8;
-
-      doc.setFont("helvetica", "normal");
-      doc.text(`Tennistraining, Gruppe „${inv.group_name}"`, 20, y);
-      doc.text(String((s.regular_count || 0) + (s.holiday_billed_count || 0)), 122, y);
-      doc.text(fmtEUR(s.total), 170, y);
-      y += 6;
-      doc.setFontSize(9); doc.setTextColor(120);
-      const parts = [`${s.regular_count || 0}x regulär (${fmtEUR(inv.price_per_training_per_student)})`];
-      if (s.holiday_billed_count > 0) parts.push(`${s.holiday_billed_count}x Ferien besucht`);
-      if (s.holiday_missed_count > 0) parts.push(`${s.holiday_missed_count}x Ferien nicht da (nicht berechnet)`);
-      doc.text(parts.join(" / "), 20, y);
-      doc.setFontSize(10); doc.setTextColor(0);
-      y += 10;
-
-      doc.setDrawColor(180); doc.line(20, y, 190, y); y += 10;
-      doc.setFont("helvetica", "bold"); doc.setFontSize(12);
-      doc.text("Gesamtbetrag", 20, y);
-      doc.text(fmtEUR(s.total), 170, y);
-      y += 20;
-
-      doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(100);
-      doc.text("Bitte überweisen Sie den Betrag innerhalb von 14 Tagen.", 20, y);
-    });
+    const pageWidth = 210;
+    const center = pageWidth / 2;
     const monthIdx = inv.month_idx ?? inv.monthIdx;
+    const dates = inv.dates || [];
+    let y = 25;
+
+    doc.setFont("helvetica", "normal"); doc.setFontSize(12);
+    doc.text("Hallöchen,", 20, y); y += 12;
+
+    doc.text(`im Monat ${MONTHS[monthIdx]} fanden ${dates.length} Trainingseinheiten statt, und zwar am`, 20, y, { maxWidth: 170 }); y += 8;
+    dates.forEach((d) => {
+      const suffix = d.holiday && d.note ? ` (${d.note})` : "";
+      doc.text(`•  ${dateLabel(d.dateIso)}${suffix}`, 26, y);
+      y += 7;
+    });
+    doc.text("statt.", 20, y); y += 12;
+
+    doc.text(`Es handelt sich um eine ${inv.student_count ?? (inv.students || []).length}er Gruppe.`, 20, y); y += 12;
+
+    doc.text(`Die Kosten für den Monat ${MONTHS[monthIdx]} belaufen sich auf:`, 20, y); y += 12;
+
+    doc.setFont("helvetica", "italic");
+    (inv.students || []).forEach((s) => {
+      const line = `${s.name}: ${s.formula} = ${fmtEUR(s.total)}`;
+      doc.text(line, center, y, { align: "center" });
+      y += 9;
+    });
+    doc.setFont("helvetica", "normal");
+    y += 8;
+
+    const payLine = biller?.paymentInfo
+      ? `Bitte nehmt das Geld beim nächsten Training mit oder überweist es an: ${biller.paymentInfo}`
+      : "Bitte nehmt das Geld beim nächsten Training mit oder überweist es zeitnah.";
+    doc.text(payLine, 20, y, { maxWidth: 170 }); y += 16;
+
+    doc.text("Viele Grüße und ein Dankeschön", 20, y); y += 14;
+    if (biller?.name) doc.text(biller.name, 20, y);
+
     doc.save(`Rechnung_${(inv.group_name || "").replace(/\s+/g, "_")}_${MONTHS[monthIdx]}_${inv.year}.pdf`);
   });
 }
