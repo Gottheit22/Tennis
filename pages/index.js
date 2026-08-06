@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { supabase } from "../lib/supabaseClient";
+import { LOGO_DATA_URL } from "../lib/logo";
 
 const WEEKDAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
 const MONTHS = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"];
@@ -529,6 +530,10 @@ function downloadInvoicePdf(inv, biller) {
     const monthIdx = inv.month_idx ?? inv.monthIdx;
     const dates = inv.dates || [];
     let y = 25;
+
+    const logoWidth = 45;
+    const logoHeight = logoWidth * (249 / 500);
+    doc.addImage(LOGO_DATA_URL, "PNG", pageWidth - 20 - logoWidth, 12, logoWidth, logoHeight);
 
     doc.setFont("helvetica", "normal"); doc.setFontSize(12);
     doc.text("Hallöchen,", 20, y); y += 12;
