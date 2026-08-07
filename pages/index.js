@@ -261,6 +261,18 @@ export default function Home() {
     });
     const total = studentsOut.reduce((sum, s) => sum + s.total, 0);
 
+    // Gibt es für diese Gruppe und denselben Zeitraum bereits eine Rechnung? Dann
+    // aktualisieren statt eine zweite (doppelt gezählte) Rechnung anzulegen.
+    const existing = invoices.find((i) =>
+      i.group_id === groupId &&
+      i.year === fromYear && i.month_idx === fromMonthIdx &&
+      (i.to_year ?? i.year) === toYear && (i.to_month_idx ?? i.month_idx) === toMonthIdx
+    );
+    // Bezahlt-Status pro Schüler aus der bisherigen Rechnung übernehmen.
+    const oldPaidById = {};
+    (existing?.students || []).forEach((s) => { if (s.paid) oldPaidById[s.id] = true; });
+    const studentsOutWithPaid = studentsOut.map((s) => (oldPaidById[s.id] ? { ...s, paid: true } : s));
+
     const record = {
       group_id: groupId,
       group_name: group.name,
@@ -271,12 +283,20 @@ export default function Home() {
       held_count: heldCount,
       student_count: studentCount,
       total,
-      students: studentsOut,
+      students: studentsOutWithPaid,
       dates: dateEntries,
     };
-    const { data } = await supabase.from("invoices").insert(record).select().maybeSingle();
-    const invoice = data || { ...record, generated_at: new Date().toISOString() };
-    setInvoices((prev) => [invoice, ...prev]);
+
+    let invoice;
+    if (existing) {
+      const { data } = await supabase.from("invoices").update(record).eq("id", existing.id).select().maybeSingle();
+      invoice = data || { ...existing, ...record };
+      setInvoices((prev) => prev.map((i) => (i.id === existing.id ? invoice : i)));
+    } else {
+      const { data } = await supabase.from("invoices").insert(record).select().maybeSingle();
+      invoice = data || { ...record, generated_at: new Date().toISOString() };
+      setInvoices((prev) => [invoice, ...prev]);
+    }
     setCurrentInvoice(invoice);
     downloadInvoicePdf(invoice, biller);
   };
