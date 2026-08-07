@@ -261,16 +261,13 @@ export default function Home() {
     });
     const total = studentsOut.reduce((sum, s) => sum + s.total, 0);
 
-    // Gibt es für diese Gruppe und denselben Zeitraum bereits eine Rechnung? Dann
-    // aktualisieren statt eine zweite (doppelt gezählte) Rechnung anzulegen.
-    const existing = invoices.find((i) =>
-      i.group_id === groupId &&
-      i.year === fromYear && i.month_idx === fromMonthIdx &&
-      (i.to_year ?? i.year) === toYear && (i.to_month_idx ?? i.month_idx) === toMonthIdx
-    );
-    // Bezahlt-Status pro Schüler aus der bisherigen Rechnung übernehmen.
+    // Alle bestehenden Rechnungen dieser Gruppe, die sich mit dem gewählten Zeitraum
+    // überschneiden (auch teilweise) — die werden durch die frisch berechnete Rechnung
+    // ersetzt, damit nichts doppelt gezählt wird.
+    const overlapping = invoices.filter((i) => i.group_id === groupId && invoiceOverlapsRange(i, fromYear, fromMonthIdx, toYear, toMonthIdx));
+    // Bezahlt-Status pro Schüler aus allen betroffenen alten Rechnungen übernehmen.
     const oldPaidById = {};
-    (existing?.students || []).forEach((s) => { if (s.paid) oldPaidById[s.id] = true; });
+    overlapping.forEach((inv) => (inv.students || []).forEach((s) => { if (s.paid) oldPaidById[s.id] = true; }));
     const studentsOutWithPaid = studentsOut.map((s) => (oldPaidById[s.id] ? { ...s, paid: true } : s));
 
     const record = {
@@ -287,16 +284,13 @@ export default function Home() {
       dates: dateEntries,
     };
 
-    let invoice;
-    if (existing) {
-      const { data } = await supabase.from("invoices").update(record).eq("id", existing.id).select().maybeSingle();
-      invoice = data || { ...existing, ...record };
-      setInvoices((prev) => prev.map((i) => (i.id === existing.id ? invoice : i)));
-    } else {
-      const { data } = await supabase.from("invoices").insert(record).select().maybeSingle();
-      invoice = data || { ...record, generated_at: new Date().toISOString() };
-      setInvoices((prev) => [invoice, ...prev]);
+    if (overlapping.length > 0) {
+      await supabase.from("invoices").delete().in("id", overlapping.map((i) => i.id));
     }
+    const { data } = await supabase.from("invoices").insert(record).select().maybeSingle();
+    const invoice = data || { ...record, generated_at: new Date().toISOString() };
+    const overlappingIds = new Set(overlapping.map((i) => i.id));
+    setInvoices((prev) => [invoice, ...prev.filter((i) => !overlappingIds.has(i.id))]);
     setCurrentInvoice(invoice);
     downloadInvoicePdf(invoice, biller);
   };
@@ -638,6 +632,8 @@ function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, fromYe
 
   const activeGroupId = groupId || groups[0]?.id;
   const rangeInvalid = toYear < fromYear || (toYear === fromYear && toMonthIdx < fromMonthIdx);
+  const groupInvoices = invoices.filter((i) => i.group_id === activeGroupId).sort((a, b) => monthNum(b.year, b.month_idx) - monthNum(a.year, a.month_idx));
+  const willOverlap = !rangeInvalid && groupInvoices.some((i) => invoiceOverlapsRange(i, fromYear, fromMonthIdx, toYear, toMonthIdx));
 
   return (
     <div>
@@ -652,6 +648,11 @@ function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, fromYe
           <select value={activeGroupId} onChange={(e) => setGroupId(e.target.value)}>
             {groups.map((g) => <option key={g.id} value={g.id}>{groupLabel(g)}</option>)}
           </select>
+        )}
+        {groupInvoices.length > 0 && (
+          <div className="tag">
+            Bereits abgerechnet für diese Gruppe: {groupInvoices.map((i) => periodLabel(i)).join(" · ")}
+          </div>
         )}
         <div className="tag">Von</div>
         <div className="gap2">
@@ -668,6 +669,7 @@ function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, fromYe
           <input type="number" value={toYear} onChange={(e) => setToYear(Number(e.target.value))} style={{ flex: 1 }} />
         </div>
         {rangeInvalid && <div className="tag" style={{ color: "var(--clay)" }}>„Bis" darf nicht vor „Von" liegen.</div>}
+        {willOverlap && <div className="tag" style={{ color: "var(--clay)" }}>Überschneidet sich mit einer bestehenden Rechnung – die wird beim Erstellen automatisch durch die neu berechnete ersetzt.</div>}
         <button className="btn-primary" disabled={groups.length === 0 || rangeInvalid} onClick={() => onGenerate(activeGroupId, fromYear, fromMonthIdx, toYear, toMonthIdx)}>⬇ PDF-Rechnung erstellen</button>
         <div className="tag">Für nur einen Monat einfach bei „Von" und „Bis" denselben Monat wählen. Erstellt eine gemeinsame PDF für die ganze Gruppe.</div>
       </div>
@@ -699,6 +701,15 @@ function periodLabel(inv) {
   const toM = inv.to_month_idx ?? inv.month_idx;
   if (toY === inv.year && toM === inv.month_idx) return `${MONTHS[inv.month_idx]} ${inv.year}`;
   return `${MONTHS[inv.month_idx]} ${inv.year} – ${MONTHS[toM]} ${toY}`;
+}
+
+function monthNum(year, monthIdx) { return year * 12 + monthIdx; }
+
+// Prüft, ob sich der Zeitraum einer bestehenden Rechnung mit dem angefragten Zeitraum überschneidet.
+function invoiceOverlapsRange(inv, fromYear, fromMonthIdx, toYear, toMonthIdx) {
+  const invFrom = monthNum(inv.year, inv.month_idx);
+  const invTo = monthNum(inv.to_year ?? inv.year, inv.to_month_idx ?? inv.month_idx);
+  return invFrom <= monthNum(toYear, toMonthIdx) && monthNum(fromYear, fromMonthIdx) <= invTo;
 }
 
 function dateLabel(dateIso) {
