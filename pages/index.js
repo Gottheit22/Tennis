@@ -192,7 +192,7 @@ export default function Home() {
         } else {
           groupStudents.forEach((s) => charges[s.id].push(flatShare));
         }
-        dateEntries.push({ dateIso: effectiveIso, holiday, note, monthIdx, year });
+        dateEntries.push({ dateIso: effectiveIso, holiday, note, monthIdx, year, movedFromIso: entry.moved_to ? originalDateIso : null });
       });
     });
     dateEntries.sort((a, b) => a.dateIso.localeCompare(b.dateIso));
@@ -560,6 +560,13 @@ function dateLabel(dateIso) {
   return `${d}.${m}`;
 }
 
+function dateSuffix(d) {
+  const parts = [];
+  if (d.holiday && d.note) parts.push(d.note);
+  if (d.movedFromIso) parts.push(`ursprünglich am: ${dateLabel(d.movedFromIso)}.`);
+  return parts.length ? ` (${parts.join("; ")})` : "";
+}
+
 function InvoiceView({ invoice, biller }) {
   const dates = invoice.dates || [];
   return (
@@ -568,7 +575,7 @@ function InvoiceView({ invoice, biller }) {
       <div className="tag" style={{ marginBottom: 6 }}>Trainings ({dates.length}):</div>
       <div style={{ fontSize: 14, marginBottom: 10 }}>
         {dates.map((d) => (
-          <div key={d.dateIso}>• {dateLabel(d.dateIso)}{d.holiday && d.note ? ` (${d.note})` : ""}</div>
+          <div key={d.dateIso}>• {dateLabel(d.dateIso)}{dateSuffix(d)}</div>
         ))}
       </div>
       <div className="net-divider" style={{ margin: "10px 0" }} />
@@ -615,7 +622,7 @@ function downloadInvoicePdf(inv, biller) {
         doc.setFont("helvetica", "normal");
         lastMonthKey = monthKey;
       }
-      const suffix = d.holiday && d.note ? ` (${d.note})` : "";
+      const suffix = dateSuffix(d);
       doc.text(`•  ${dateLabel(d.dateIso)}${suffix}`, 26, y);
       y += 7;
     });
@@ -637,8 +644,11 @@ function downloadInvoicePdf(inv, biller) {
     doc.setFont("helvetica", "normal");
     y += 8;
 
+    const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((biller?.paymentInfo || "").trim());
     const payLine = biller?.paymentInfo
-      ? `Bitte nehmt das Geld beim nächsten Training mit oder überweist es an: ${biller.paymentInfo}`
+      ? (isEmail
+          ? `Bitte nehmt das Geld beim nächsten Training mit oder sendet es mir per PayPal an: ${biller.paymentInfo}`
+          : `Bitte nehmt das Geld beim nächsten Training mit oder überweist es an: ${biller.paymentInfo}`)
       : "Bitte nehmt das Geld beim nächsten Training mit oder überweist es zeitnah.";
     doc.text(payLine, 20, y, { maxWidth: 170 }); y += 16;
 
