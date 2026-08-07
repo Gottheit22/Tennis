@@ -295,10 +295,10 @@ export default function Home() {
     downloadInvoicePdf(invoice, biller);
   };
 
-  const togglePaid = async (invoiceId, studentId, paid) => {
+  const togglePaid = async (invoiceId, lineIndex, paid) => {
     const invoice = invoices.find((i) => i.id === invoiceId);
     if (!invoice) return;
-    const updatedStudents = (invoice.students || []).map((s) => (s.id === studentId ? { ...s, paid } : s));
+    const updatedStudents = (invoice.students || []).map((s, idx) => (idx === lineIndex ? { ...s, paid } : s));
     await supabase.from("invoices").update({ students: updatedStudents }).eq("id", invoiceId);
     setInvoices((prev) => prev.map((i) => (i.id === invoiceId ? { ...i, students: updatedStudents } : i)));
     setCurrentInvoice((prev) => (prev && prev.id === invoiceId ? { ...prev, students: updatedStudents } : prev));
@@ -736,14 +736,14 @@ function InvoiceView({ invoice, biller, onTogglePaid }) {
         ))}
       </div>
       <div className="net-divider" style={{ margin: "10px 0" }} />
-      {(invoice.students || []).map((s) => (
-        <div key={s.id} className="row" style={{ margin: "6px 0" }}>
+      {(invoice.students || []).map((s, idx) => (
+        <div key={`${s.id}-${idx}`} className="row" style={{ margin: "6px 0" }}>
           <span>{s.name}: {s.formula}</span>
           <div className="gap2" style={{ alignItems: "center" }}>
             <span className="disp" style={{ whiteSpace: "nowrap" }}>= {fmtEUR(s.total)}</span>
             {onTogglePaid && (
               <button className="pill" style={{ fontSize: 11, padding: "4px 8px" }}
-                onClick={() => onTogglePaid(invoice.id, s.id, !s.paid)}>
+                onClick={() => onTogglePaid(invoice.id, idx, !s.paid)}>
                 {s.paid ? "✓ bezahlt" : "offen"}
               </button>
             )}
@@ -762,12 +762,12 @@ function OpenPaymentsTab({ invoices, onTogglePaid }) {
 
   const byStudent = new Map();
   invoices.forEach((inv) => {
-    (inv.students || []).forEach((s) => {
+    (inv.students || []).forEach((s, idx) => {
       if (s.paid) return;
       if (!byStudent.has(s.id)) byStudent.set(s.id, { id: s.id, name: s.name, total: 0, items: [] });
       const entry = byStudent.get(s.id);
       entry.total += s.total;
-      entry.items.push({ invoiceId: inv.id, groupName: inv.group_name, period: periodLabel(inv), amount: s.total, studentId: s.id });
+      entry.items.push({ invoiceId: inv.id, groupName: inv.group_name, period: periodLabel(inv), amount: s.total, lineIndex: idx });
     });
   });
   const openStudents = [...byStudent.values()].sort((a, b) => b.total - a.total);
@@ -801,7 +801,7 @@ function OpenPaymentsTab({ invoices, onTogglePaid }) {
                       <span style={{ fontSize: 14 }}>{it.groupName} — {it.period}</span>
                       <div className="gap2" style={{ alignItems: "center" }}>
                         <span className="disp" style={{ whiteSpace: "nowrap" }}>{fmtEUR(it.amount)}</span>
-                        <button className="pill" style={{ fontSize: 11, padding: "4px 8px" }} onClick={() => onTogglePaid(it.invoiceId, it.studentId, true)}>
+                        <button className="pill" style={{ fontSize: 11, padding: "4px 8px" }} onClick={() => onTogglePaid(it.invoiceId, it.lineIndex, true)}>
                           ✓ als bezahlt markieren
                         </button>
                       </div>
