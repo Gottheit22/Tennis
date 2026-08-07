@@ -591,12 +591,12 @@ function downloadInvoicePdf(inv, biller) {
     const pageWidth = 210;
     const center = pageWidth / 2;
     const dates = inv.dates || [];
-    let y = 25;
+    let y = 48;
     const isMultiMonth = periodLabel(inv).includes("–");
 
-    const logoWidth = 45;
+    const logoWidth = 70;
     const logoHeight = logoWidth * (249 / 500);
-    doc.addImage(LOGO_DATA_URL, "PNG", pageWidth - 20 - logoWidth, 12, logoWidth, logoHeight);
+    doc.addImage(LOGO_DATA_URL, "PNG", pageWidth - 20 - logoWidth, 14, logoWidth, logoHeight);
 
     doc.setFont("helvetica", "normal"); doc.setFontSize(12);
     doc.text("Hallöchen,", 20, y); y += 12;
