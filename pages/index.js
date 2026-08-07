@@ -133,11 +133,11 @@ export default function Home() {
   // ---- Training / Anwesenheit ----
   const upsertAttendance = async (groupId, dateIso, patch) => {
     const key = `${groupId}__${dateIso}`;
-    const existing = attendance[key] || { cancelled: false, present: {}, moved_to: null };
+    const existing = attendance[key] || { cancelled: false, present: {}, moved_to: null, duration: null };
     const next = { ...existing, ...patch };
     const { data } = await supabase
       .from("attendance")
-      .upsert({ id: existing.id, group_id: groupId, date: dateIso, cancelled: next.cancelled, present: next.present, moved_to: next.moved_to || null }, { onConflict: "group_id,date" })
+      .upsert({ id: existing.id, group_id: groupId, date: dateIso, cancelled: next.cancelled, present: next.present, moved_to: next.moved_to || null, duration: next.duration || null }, { onConflict: "group_id,date" })
       .select()
       .maybeSingle();
     setAttendance((prev) => ({ ...prev, [key]: data || { ...next, group_id: groupId, date: dateIso } }));
@@ -154,6 +154,9 @@ export default function Home() {
   const setMovedDate = (groupId, dateIso, movedToIso) => {
     upsertAttendance(groupId, dateIso, { moved_to: movedToIso || null });
   };
+  const setTrainingDuration = (groupId, dateIso, minutes) => {
+    upsertAttendance(groupId, dateIso, { duration: minutes || null });
+  };
 
   // ---- Rechnung ----
   const saveBiller = async (name, address, paymentInfo) => {
@@ -166,8 +169,6 @@ export default function Home() {
     if (!group) return;
     const groupStudents = students.filter((s) => (s.group_ids || []).includes(groupId));
     const studentCount = groupStudents.length;
-    const slotCost = HOURLY_RATE * (group.duration / 60);
-    const flatShare = studentCount > 0 ? slotCost / studentCount : 0;
     const schoolchildCount = groupStudents.filter((s) => s.is_schoolchild).length;
 
     // Alle Monate im gewählten Zeitraum (inklusive) durchlaufen.
@@ -187,9 +188,12 @@ export default function Home() {
     monthList.forEach(({ year, monthIdx }) => {
       datesForMonth(year, monthIdx, group.weekday).forEach((d) => {
         const originalDateIso = isoDate(d);
-        const entry = attendance[`${groupId}__${originalDateIso}`] || { cancelled: false, present: {}, moved_to: null };
+        const entry = attendance[`${groupId}__${originalDateIso}`] || { cancelled: false, present: {}, moved_to: null, duration: null };
         if (entry.cancelled) return;
         const effectiveIso = entry.moved_to || originalDateIso;
+        const effectiveDuration = entry.duration || group.duration;
+        const slotCost = HOURLY_RATE * (effectiveDuration / 60);
+        const flatShare = studentCount > 0 ? slotCost / studentCount : 0;
         heldCount++;
         const holiday = isBavarianHoliday(effectiveIso);
         let note = "";
@@ -205,6 +209,9 @@ export default function Home() {
           }
         } else {
           groupStudents.forEach((s) => charges[s.id].push(flatShare));
+        }
+        if (entry.duration && entry.duration !== group.duration) {
+          note = note ? `${note}; ${entry.duration} Min` : `${entry.duration} Min`;
         }
         dateEntries.push({ dateIso: effectiveIso, holiday, note, monthIdx, year, movedFromIso: entry.moved_to ? originalDateIso : null });
       });
@@ -261,7 +268,7 @@ export default function Home() {
           groupId={trainingGroupId} setGroupId={setTrainingGroupId}
           year={trainingYear} monthIdx={trainingMonth}
           setYear={setTrainingYear} setMonthIdx={setTrainingMonth}
-          onToggleCancel={toggleCancelled} onTogglePresent={togglePresent} onSetMovedDate={setMovedDate}
+          onToggleCancel={toggleCancelled} onTogglePresent={togglePresent} onSetMovedDate={setMovedDate} onSetDuration={setTrainingDuration}
         />
       )}
       {tab === "schueler" && (
@@ -313,12 +320,14 @@ function Nav({ tab, setTab }) {
 
 function GroupChecklist({ groups, selected, onToggle }) {
   return (
-    <div className="gap2" style={{ flexWrap: "wrap" }}>
+    <div className="col" style={{ gap: 6 }}>
       {groups.map((g) => {
         const on = selected.includes(g.id);
         return (
-          <button key={g.id} type="button" className={`pill ${on ? "on" : ""}`} onClick={() => onToggle(g.id)}>
-            {on ? "✓" : "✕"} {groupLabel(g)}
+          <button key={g.id} type="button" className="row" onClick={() => onToggle(g.id)}
+            style={{ background: on ? "rgba(215,242,44,0.1)" : "var(--surface2)", border: `1px solid ${on ? "var(--ball)" : "var(--line)"}`, borderRadius: 8, padding: "10px 12px", cursor: "pointer", width: "100%" }}>
+            <span style={{ color: on ? "var(--ball)" : "var(--chalk)" }}>{groupLabel(g)}</span>
+            <span style={{ color: on ? "var(--ball)" : "var(--chalk-dim)" }}>{on ? "✓" : ""}</span>
           </button>
         );
       })}
@@ -338,8 +347,8 @@ function StudentsTab({ students, groups, onAdd, onDelete, onUpdate }) {
 
   return (
     <div>
-      <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Schüler anlegen</div>
-      <div className="card col">
+      <div className="disp" style={{ fontSize: 18, marginBottom: 12, position: "sticky", top: 0, background: "var(--bg)", paddingTop: 4, zIndex: 5 }}>Schüler anlegen</div>
+      <div className="card col" style={{ position: "sticky", top: 34, zIndex: 5, boxShadow: "0 8px 12px -6px rgba(0,0,0,0.4)" }}>
         <input placeholder="Name des Schülers" value={name} onChange={(e) => setName(e.target.value)} />
         <div className="tag">Gruppen (mehrere möglich, z. B. Gruppentraining + Einzeltraining)</div>
         {groups.length === 0 ? <div className="tag" style={{ color: "var(--clay)" }}>Lege zuerst eine Gruppe an (Tab „Gruppen").</div> : (
@@ -407,6 +416,7 @@ function GroupsTab({ groups, students, onAdd, onDelete }) {
   const [weekday, setWeekday] = useState(0);
   const [time, setTime] = useState("16:00");
   const [duration, setDuration] = useState(60);
+  const [expandedId, setExpandedId] = useState(null);
   return (
     <div>
       <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Gruppe anlegen</div>
@@ -428,14 +438,28 @@ function GroupsTab({ groups, students, onAdd, onDelete }) {
       <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Alle Gruppen ({groups.length})</div>
       {groups.length === 0 && <div className="empty">Noch keine Gruppen angelegt.</div>}
       {groups.map((g) => {
-        const count = students.filter((s) => (s.group_ids || []).includes(g.id)).length;
+        const members = students.filter((s) => (s.group_ids || []).includes(g.id));
+        const expanded = expandedId === g.id;
         return (
-          <div key={g.id} className="card row" style={{ marginBottom: 8 }}>
-            <div>
-              <div style={{ fontWeight: 500 }}>{g.name}</div>
-              <div className="tag">{WEEKDAYS[g.weekday]} · {g.time} Uhr · {g.duration} Min · {count} Schüler</div>
-            </div>
-            <button className="icon-btn" onClick={() => onDelete(g.id)}>✕</button>
+          <div key={g.id} className="card" style={{ marginBottom: 8 }}>
+            <button className="row" style={{ width: "100%", background: "none", border: "none", cursor: "pointer", textAlign: "left" }} onClick={() => setExpandedId(expanded ? null : g.id)}>
+              <div>
+                <div style={{ fontWeight: 500 }}>{g.name}</div>
+                <div className="tag">{WEEKDAYS[g.weekday]} · {g.time} Uhr · {g.duration} Min · {members.length} Schüler</div>
+              </div>
+              <span className="tag">{expanded ? "▲" : "▼"}</span>
+            </button>
+            {expanded && (
+              <div style={{ marginTop: 10 }}>
+                <div className="net-divider" style={{ margin: "0 0 10px" }} />
+                {members.length === 0 ? <div className="tag">Keine Schüler in dieser Gruppe.</div> : (
+                  <div className="col" style={{ gap: 4 }}>
+                    {members.map((m) => <div key={m.id} style={{ fontSize: 14 }}>• {m.name}</div>)}
+                  </div>
+                )}
+                <button className="icon-btn" style={{ marginTop: 10 }} onClick={() => onDelete(g.id)}>✕ Gruppe löschen</button>
+              </div>
+            )}
           </div>
         );
       })}
@@ -443,9 +467,11 @@ function GroupsTab({ groups, students, onAdd, onDelete }) {
   );
 }
 
-function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, monthIdx, setYear, setMonthIdx, onToggleCancel, onTogglePresent, onSetMovedDate }) {
+function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, monthIdx, setYear, setMonthIdx, onToggleCancel, onTogglePresent, onSetMovedDate, onSetDuration }) {
   const [movingDate, setMovingDate] = useState(null);
   const [moveValue, setMoveValue] = useState("");
+  const [editingDuration, setEditingDuration] = useState(null);
+  const [durationValue, setDurationValue] = useState("");
 
   if (groups.length === 0) return <div className="empty">Lege zuerst eine Gruppe an (Tab „Gruppen").</div>;
   const group = groups.find((g) => g.id === groupId) || groups[0];
@@ -469,14 +495,16 @@ function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, 
         <div className="disp">{MONTHS[monthIdx]} {year}</div>
         <button className="card" style={{ padding: "8px 12px", cursor: "pointer" }} onClick={() => shiftMonth(1)}>›</button>
       </div>
-      <div className="tag" style={{ marginBottom: 12 }}>{WEEKDAYS[group.weekday]}, {group.time} Uhr · {group.duration} Min · {groupStudents.length} Schüler</div>
+      <div className="tag" style={{ marginBottom: 12 }}>{WEEKDAYS[group.weekday]}, {group.time} Uhr · {group.duration} Min (Standard) · {groupStudents.length} Schüler</div>
       {dates.length === 0 && <div className="empty">Kein passender Wochentag in diesem Monat.</div>}
       {dates.map((d) => {
         const dateIso = isoDate(d);
-        const entry = attendance[`${group.id}__${dateIso}`] || { cancelled: false, present: {}, moved_to: null };
+        const entry = attendance[`${group.id}__${dateIso}`] || { cancelled: false, present: {}, moved_to: null, duration: null };
         const effectiveIso = entry.moved_to || dateIso;
         const effectiveLabel = new Date(effectiveIso + "T00:00:00").toLocaleDateString("de-DE", { weekday: "short", day: "2-digit", month: "2-digit" });
         const isMoving = movingDate === dateIso;
+        const isEditingDuration = editingDuration === dateIso;
+        const effectiveDuration = entry.duration || group.duration;
         return (
           <div key={dateIso} className="card" style={{ marginBottom: 8, opacity: entry.cancelled ? 0.55 : 1 }}>
             <div className="row" style={{ marginBottom: 8 }}>
@@ -484,15 +512,22 @@ function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, 
                 {effectiveLabel}
                 {entry.moved_to && <span className="tag" style={{ marginLeft: 6 }}>verschoben von {dateLabel(dateIso)}</span>}
               </div>
-              <div className="gap2">
-                <button className="tag" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--chalk-dim)" }}
-                  onClick={() => { setMovingDate(isMoving ? null : dateIso); setMoveValue(effectiveIso); }}>
-                  Datum ändern
-                </button>
-                <button className="tag" style={{ background: "none", border: "none", cursor: "pointer", color: entry.cancelled ? "var(--clay)" : "var(--chalk-dim)" }} onClick={() => onToggleCancel(group.id, dateIso)}>
-                  {entry.cancelled ? "Ausgefallen ✕ (wieder aktivieren)" : "Als ausgefallen markieren"}
-                </button>
-              </div>
+            </div>
+            <div className="tag" style={{ marginBottom: 8 }}>
+              {effectiveDuration} Min{entry.duration && entry.duration !== group.duration ? " (abweichend)" : ""}
+            </div>
+            <div className="gap2" style={{ marginBottom: 8, flexWrap: "wrap" }}>
+              <button className="tag" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--chalk-dim)" }}
+                onClick={() => { setMovingDate(isMoving ? null : dateIso); setMoveValue(effectiveIso); setEditingDuration(null); }}>
+                Datum ändern
+              </button>
+              <button className="tag" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--chalk-dim)" }}
+                onClick={() => { setEditingDuration(isEditingDuration ? null : dateIso); setDurationValue(String(effectiveDuration)); setMovingDate(null); }}>
+                Dauer ändern
+              </button>
+              <button className="tag" style={{ background: "none", border: "none", cursor: "pointer", color: entry.cancelled ? "var(--clay)" : "var(--chalk-dim)" }} onClick={() => onToggleCancel(group.id, dateIso)}>
+                {entry.cancelled ? "Ausgefallen ✕ (wieder aktivieren)" : "Als ausgefallen markieren"}
+              </button>
             </div>
             {isMoving && (
               <div className="gap2" style={{ marginBottom: 10, alignItems: "center" }}>
@@ -501,6 +536,19 @@ function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, 
                 {entry.moved_to && (
                   <button className="btn-primary" style={{ width: "auto", padding: "8px 14px", background: "var(--surface2)", color: "var(--chalk)" }}
                     onClick={() => { onSetMovedDate(group.id, dateIso, null); setMovingDate(null); }}>
+                    Zurücksetzen
+                  </button>
+                )}
+              </div>
+            )}
+            {isEditingDuration && (
+              <div className="gap2" style={{ marginBottom: 10, alignItems: "center" }}>
+                <input type="number" min="15" step="15" value={durationValue} onChange={(e) => setDurationValue(e.target.value)} style={{ flex: 1 }} />
+                <button className="btn-primary" style={{ width: "auto", padding: "8px 14px" }}
+                  onClick={() => { const v = Number(durationValue); onSetDuration(group.id, dateIso, v === group.duration ? null : v); setEditingDuration(null); }}>OK</button>
+                {entry.duration && (
+                  <button className="btn-primary" style={{ width: "auto", padding: "8px 14px", background: "var(--surface2)", color: "var(--chalk)" }}
+                    onClick={() => { onSetDuration(group.id, dateIso, null); setEditingDuration(null); }}>
                     Zurücksetzen
                   </button>
                 )}
@@ -598,7 +646,7 @@ function dateLabel(dateIso) {
 
 function dateSuffix(d) {
   const parts = [];
-  if (d.holiday && d.note) parts.push(d.note);
+  if (d.note) parts.push(d.note);
   if (d.movedFromIso) parts.push(`ursprünglich am: ${dateLabel(d.movedFromIso)}.`);
   return parts.length ? ` (${parts.join("; ")})` : "";
 }
