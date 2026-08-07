@@ -281,6 +281,15 @@ export default function Home() {
     downloadInvoicePdf(invoice, biller);
   };
 
+  const togglePaid = async (invoiceId, studentId, paid) => {
+    const invoice = invoices.find((i) => i.id === invoiceId);
+    if (!invoice) return;
+    const updatedStudents = (invoice.students || []).map((s) => (s.id === studentId ? { ...s, paid } : s));
+    await supabase.from("invoices").update({ students: updatedStudents }).eq("id", invoiceId);
+    setInvoices((prev) => prev.map((i) => (i.id === invoiceId ? { ...i, students: updatedStudents } : i)));
+    setCurrentInvoice((prev) => (prev && prev.id === invoiceId ? { ...prev, students: updatedStudents } : prev));
+  };
+
   if (!ready) return <div className="wrap"><Header /><div className="empty">Lade Daten …</div></div>;
 
   return (
@@ -312,8 +321,10 @@ export default function Home() {
           onGenerate={generateInvoice}
           current={currentInvoice} setCurrent={setCurrentInvoice}
           invoices={invoices}
+          onTogglePaid={togglePaid}
         />
       )}
+      {tab === "offen" && <OpenPaymentsTab invoices={invoices} onTogglePaid={togglePaid} />}
       <Nav tab={tab} setTab={setTab} />
     </div>
   );
@@ -332,7 +343,7 @@ function Header() {
 }
 
 function Nav({ tab, setTab }) {
-  const items = [["training", "Training"], ["schueler", "Schüler"], ["gruppen", "Gruppen"], ["rechnungen", "Rechnung"]];
+  const items = [["training", "Training"], ["schueler", "Schüler"], ["gruppen", "Gruppen"], ["rechnungen", "Rechnung"], ["offen", "Offen"]];
   return (
     <div className="nav"><div className="nav-inner">
       {items.map(([id, label]) => (
@@ -598,7 +609,7 @@ function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, 
   );
 }
 
-function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, fromYear, fromMonthIdx, toYear, toMonthIdx, setFromYear, setFromMonthIdx, setToYear, setToMonthIdx, onGenerate, current, setCurrent, invoices }) {
+function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, fromYear, fromMonthIdx, toYear, toMonthIdx, setFromYear, setFromMonthIdx, setToYear, setToMonthIdx, onGenerate, current, setCurrent, invoices, onTogglePaid }) {
   const [billerName, setBillerName] = useState(biller.name);
   const [billerAddress, setBillerAddress] = useState(biller.address);
   const [paymentInfo, setPaymentInfo] = useState(biller.paymentInfo);
@@ -641,17 +652,24 @@ function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, fromYe
         <div className="tag">Für nur einen Monat einfach bei „Von" und „Bis" denselben Monat wählen. Erstellt eine gemeinsame PDF für die ganze Gruppe.</div>
       </div>
 
-      {current && <InvoiceView invoice={current} biller={biller} />}
+      {current && <InvoiceView invoice={current} biller={biller} onTogglePaid={onTogglePaid} />}
 
       <div className="net-divider" />
       <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Verlauf ({invoices.length})</div>
       {invoices.length === 0 && <div className="empty">Noch keine Rechnungen erstellt.</div>}
-      {invoices.map((inv) => (
-        <button key={inv.id} className="card" style={{ textAlign: "left", width: "100%", marginBottom: 8, cursor: "pointer" }} onClick={() => setCurrent(inv)}>
-          <div style={{ fontWeight: 500 }}>{inv.group_name} — {periodLabel(inv)}</div>
-          <div className="tag">{inv.held_count} Trainings · Gesamt {fmtEUR(inv.total)}</div>
-        </button>
-      ))}
+      {invoices.map((inv) => {
+        const openCount = (inv.students || []).filter((s) => !s.paid).length;
+        return (
+          <button key={inv.id} className="card" style={{ textAlign: "left", width: "100%", marginBottom: 8, cursor: "pointer" }} onClick={() => setCurrent(inv)}>
+            <div style={{ fontWeight: 500 }}>{inv.group_name} — {periodLabel(inv)}</div>
+            <div className="tag">
+              {inv.held_count} Trainings · Gesamt {fmtEUR(inv.total)}
+              {" · "}
+              <span style={{ color: openCount > 0 ? "var(--clay)" : "var(--ball-dim)" }}>{openCount > 0 ? `${openCount} offen` : "alle bezahlt"}</span>
+            </div>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -675,7 +693,7 @@ function dateSuffix(d) {
   return parts.length ? ` (${parts.join("; ")})` : "";
 }
 
-function InvoiceView({ invoice, biller }) {
+function InvoiceView({ invoice, biller, onTogglePaid }) {
   const dates = invoice.dates || [];
   return (
     <div className="card" style={{ marginTop: 16 }}>
@@ -690,12 +708,80 @@ function InvoiceView({ invoice, biller }) {
       {(invoice.students || []).map((s) => (
         <div key={s.id} className="row" style={{ margin: "6px 0" }}>
           <span>{s.name}: {s.formula}</span>
-          <span className="disp" style={{ whiteSpace: "nowrap", marginLeft: 8 }}>= {fmtEUR(s.total)}</span>
+          <div className="gap2" style={{ alignItems: "center" }}>
+            <span className="disp" style={{ whiteSpace: "nowrap" }}>= {fmtEUR(s.total)}</span>
+            {onTogglePaid && (
+              <button className="pill" style={{ fontSize: 11, padding: "4px 8px" }}
+                onClick={() => onTogglePaid(invoice.id, s.id, !s.paid)}>
+                {s.paid ? "✓ bezahlt" : "offen"}
+              </button>
+            )}
+          </div>
         </div>
       ))}
       <div className="net-divider" style={{ margin: "10px 0" }} />
       <div className="row"><span className="disp" style={{ fontSize: 16 }}>Gesamt</span><span className="disp" style={{ fontSize: 18, color: "var(--ball)" }}>{fmtEUR(invoice.total)}</span></div>
       <button className="btn-primary" style={{ marginTop: 12 }} onClick={() => downloadInvoicePdf(invoice, biller)}>⬇ PDF erneut herunterladen</button>
+    </div>
+  );
+}
+
+function OpenPaymentsTab({ invoices, onTogglePaid }) {
+  const [expandedId, setExpandedId] = useState(null);
+
+  const byStudent = new Map();
+  invoices.forEach((inv) => {
+    (inv.students || []).forEach((s) => {
+      if (s.paid) return;
+      if (!byStudent.has(s.id)) byStudent.set(s.id, { id: s.id, name: s.name, total: 0, items: [] });
+      const entry = byStudent.get(s.id);
+      entry.total += s.total;
+      entry.items.push({ invoiceId: inv.id, groupName: inv.group_name, period: periodLabel(inv), amount: s.total, studentId: s.id });
+    });
+  });
+  const openStudents = [...byStudent.values()].sort((a, b) => b.total - a.total);
+  const grandTotal = openStudents.reduce((sum, s) => sum + s.total, 0);
+
+  return (
+    <div>
+      <div className="disp" style={{ fontSize: 18, marginBottom: 4 }}>Offene Zahlungen</div>
+      <div className="tag" style={{ marginBottom: 12 }}>Gesamt offen: <span style={{ color: "var(--ball)" }}>{fmtEUR(grandTotal)}</span></div>
+      {openStudents.length === 0 && <div className="empty">Alles bezahlt. 🎾</div>}
+      {openStudents.map((s) => {
+        const expanded = expandedId === s.id;
+        return (
+          <div key={s.id} className="card" style={{ marginBottom: 8 }}>
+            <button className="row" style={{ width: "100%", background: "none", border: "none", cursor: "pointer", textAlign: "left" }} onClick={() => setExpandedId(expanded ? null : s.id)}>
+              <div>
+                <div style={{ fontWeight: 500 }}>{s.name}</div>
+                <div className="tag">{s.items.length} offene Rechnung{s.items.length !== 1 ? "en" : ""}</div>
+              </div>
+              <div className="row" style={{ gap: 8 }}>
+                <span className="disp" style={{ color: "var(--clay)" }}>{fmtEUR(s.total)}</span>
+                <span className="tag">{expanded ? "▲" : "▼"}</span>
+              </div>
+            </button>
+            {expanded && (
+              <div style={{ marginTop: 10 }}>
+                <div className="net-divider" style={{ margin: "0 0 10px" }} />
+                <div className="col" style={{ gap: 8 }}>
+                  {s.items.map((it, idx) => (
+                    <div key={idx} className="row">
+                      <span style={{ fontSize: 14 }}>{it.groupName} — {it.period}</span>
+                      <div className="gap2" style={{ alignItems: "center" }}>
+                        <span className="disp" style={{ whiteSpace: "nowrap" }}>{fmtEUR(it.amount)}</span>
+                        <button className="pill" style={{ fontSize: 11, padding: "4px 8px" }} onClick={() => onTogglePaid(it.invoiceId, it.studentId, true)}>
+                          ✓ als bezahlt markieren
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
