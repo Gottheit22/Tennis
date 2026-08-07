@@ -179,42 +179,66 @@ export default function Home() {
       cm++; if (cm > 11) { cm = 0; cy++; }
       if (monthList.length > 24) break; // Sicherheitsnetz
     }
+    const monthKeySet = new Set(monthList.map(({ year, monthIdx }) => `${year}-${monthIdx}`));
+    const monthKeyOf = (dateIso) => {
+      const [y, m] = dateIso.split("-").map(Number);
+      return `${y}-${m - 1}`;
+    };
 
     const charges = {};
     groupStudents.forEach((s) => { charges[s.id] = []; });
     const dateEntries = [];
     let heldCount = 0;
 
+    // Sitzungen sammeln: nach dem tatsächlichen (ggf. verschobenen) Datum zählen,
+    // nicht nach dem ursprünglich generierten Wochentags-Datum.
+    const sessions = [];
     monthList.forEach(({ year, monthIdx }) => {
       datesForMonth(year, monthIdx, group.weekday).forEach((d) => {
         const originalDateIso = isoDate(d);
         const entry = attendance[`${groupId}__${originalDateIso}`] || { cancelled: false, present: {}, moved_to: null, duration: null };
         if (entry.cancelled) return;
         const effectiveIso = entry.moved_to || originalDateIso;
-        const effectiveDuration = entry.duration || group.duration;
-        const slotCost = HOURLY_RATE * (effectiveDuration / 60);
-        const flatShare = studentCount > 0 ? slotCost / studentCount : 0;
-        heldCount++;
-        const holiday = isBavarianHoliday(effectiveIso);
-        let note = "";
-        if (holiday) {
-          groupStudents.filter((s) => !s.is_schoolchild).forEach((s) => charges[s.id].push(flatShare));
-          const attendingSchoolchildren = groupStudents.filter((s) => s.is_schoolchild && entry.present[s.id]);
-          if (attendingSchoolchildren.length > 0) {
-            const share = slotCost / attendingSchoolchildren.length;
-            attendingSchoolchildren.forEach((s) => charges[s.id].push(share));
-          }
-          if (schoolchildCount > 0) {
-            note = attendingSchoolchildren.length > 0 ? attendingSchoolchildren.map((s) => s.name).join(", ") : "niemand von den Schulkindern";
-          }
-        } else {
-          groupStudents.forEach((s) => charges[s.id].push(flatShare));
-        }
-        if (entry.duration && entry.duration !== group.duration) {
-          note = note ? `${note}; ${entry.duration} Min` : `${entry.duration} Min`;
-        }
-        dateEntries.push({ dateIso: effectiveIso, holiday, note, monthIdx, year, movedFromIso: entry.moved_to ? originalDateIso : null });
+        if (!monthKeySet.has(monthKeyOf(effectiveIso))) return; // aus dem Zeitraum herausverschoben
+        sessions.push({ originalDateIso, entry, effectiveIso });
       });
+    });
+    // Zusätzlich: Sitzungen, die aus einem Monat AUSSERHALB des gewählten Zeitraums
+    // in den Zeitraum hinein verschoben wurden.
+    Object.entries(attendance).forEach(([key, entry]) => {
+      if (!key.startsWith(`${groupId}__`)) return;
+      if (!entry || !entry.moved_to || entry.cancelled) return;
+      const originalDateIso = key.slice(`${groupId}__`.length);
+      if (monthKeySet.has(monthKeyOf(originalDateIso))) return; // schon oben verarbeitet
+      if (!monthKeySet.has(monthKeyOf(entry.moved_to))) return; // nicht in diesen Zeitraum verschoben
+      sessions.push({ originalDateIso, entry, effectiveIso: entry.moved_to });
+    });
+
+    sessions.forEach(({ originalDateIso, entry, effectiveIso }) => {
+      const effectiveDuration = entry.duration || group.duration;
+      const slotCost = HOURLY_RATE * (effectiveDuration / 60);
+      const flatShare = studentCount > 0 ? slotCost / studentCount : 0;
+      heldCount++;
+      const holiday = isBavarianHoliday(effectiveIso);
+      let note = "";
+      if (holiday) {
+        groupStudents.filter((s) => !s.is_schoolchild).forEach((s) => charges[s.id].push(flatShare));
+        const attendingSchoolchildren = groupStudents.filter((s) => s.is_schoolchild && entry.present[s.id]);
+        if (attendingSchoolchildren.length > 0) {
+          const share = slotCost / attendingSchoolchildren.length;
+          attendingSchoolchildren.forEach((s) => charges[s.id].push(share));
+        }
+        if (schoolchildCount > 0) {
+          note = attendingSchoolchildren.length > 0 ? attendingSchoolchildren.map((s) => s.name).join(", ") : "niemand von den Schulkindern";
+        }
+      } else {
+        groupStudents.forEach((s) => charges[s.id].push(flatShare));
+      }
+      if (entry.duration && entry.duration !== group.duration) {
+        note = note ? `${note}; ${entry.duration} Min` : `${entry.duration} Min`;
+      }
+      const [ey, em] = effectiveIso.split("-").map(Number);
+      dateEntries.push({ dateIso: effectiveIso, holiday, note, monthIdx: em - 1, year: ey, movedFromIso: entry.moved_to ? originalDateIso : null });
     });
     dateEntries.sort((a, b) => a.dateIso.localeCompare(b.dateIso));
 
