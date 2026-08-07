@@ -58,8 +58,10 @@ export default function Home() {
   const [trainingMonth, setTrainingMonth] = useState(new Date().getMonth());
 
   const [invoiceGroupId, setInvoiceGroupId] = useState(null);
-  const [invoiceYear, setInvoiceYear] = useState(new Date().getFullYear());
-  const [invoiceMonth, setInvoiceMonth] = useState(new Date().getMonth());
+  const [invoiceFromYear, setInvoiceFromYear] = useState(new Date().getFullYear());
+  const [invoiceFromMonth, setInvoiceFromMonth] = useState(new Date().getMonth());
+  const [invoiceToYear, setInvoiceToYear] = useState(new Date().getFullYear());
+  const [invoiceToMonth, setInvoiceToMonth] = useState(new Date().getMonth());
   const [currentInvoice, setCurrentInvoice] = useState(null);
 
   const loadAll = useCallback(async () => {
@@ -117,11 +119,11 @@ export default function Home() {
   // ---- Training / Anwesenheit ----
   const upsertAttendance = async (groupId, dateIso, patch) => {
     const key = `${groupId}__${dateIso}`;
-    const existing = attendance[key] || { cancelled: false, present: {} };
+    const existing = attendance[key] || { cancelled: false, present: {}, moved_to: null };
     const next = { ...existing, ...patch };
     const { data } = await supabase
       .from("attendance")
-      .upsert({ id: existing.id, group_id: groupId, date: dateIso, cancelled: next.cancelled, present: next.present }, { onConflict: "group_id,date" })
+      .upsert({ id: existing.id, group_id: groupId, date: dateIso, cancelled: next.cancelled, present: next.present, moved_to: next.moved_to || null }, { onConflict: "group_id,date" })
       .select()
       .maybeSingle();
     setAttendance((prev) => ({ ...prev, [key]: data || { ...next, group_id: groupId, date: dateIso } }));
@@ -135,6 +137,9 @@ export default function Home() {
     const present = { ...entry.present, [studentId]: !entry.present[studentId] };
     upsertAttendance(groupId, dateIso, { present });
   };
+  const setMovedDate = (groupId, dateIso, movedToIso) => {
+    upsertAttendance(groupId, dateIso, { moved_to: movedToIso || null });
+  };
 
   // ---- Rechnung ----
   const saveBiller = async (name, address, paymentInfo) => {
@@ -142,48 +147,59 @@ export default function Home() {
     await supabase.from("biller").upsert({ id: 1, name, address, payment_info: paymentInfo });
   };
 
-  const generateInvoice = async (groupId, year, monthIdx) => {
+  const generateInvoice = async (groupId, fromYear, fromMonthIdx, toYear, toMonthIdx) => {
     const group = groups.find((g) => g.id === groupId);
     if (!group) return;
-    const dates = datesForMonth(year, monthIdx, group.weekday);
     const groupStudents = students.filter((s) => s.group_id === groupId);
     const studentCount = groupStudents.length;
     const slotCost = HOURLY_RATE * (group.duration / 60);
     const flatShare = studentCount > 0 ? slotCost / studentCount : 0;
     const schoolchildCount = groupStudents.filter((s) => s.is_schoolchild).length;
 
-    const charges = {}; // studentId -> [amount, amount, ...] (nur tatsächlich berechnete Termine)
+    // Alle Monate im gewählten Zeitraum (inklusive) durchlaufen.
+    const monthList = [];
+    let cy = fromYear, cm = fromMonthIdx;
+    while (cy < toYear || (cy === toYear && cm <= toMonthIdx)) {
+      monthList.push({ year: cy, monthIdx: cm });
+      cm++; if (cm > 11) { cm = 0; cy++; }
+      if (monthList.length > 24) break; // Sicherheitsnetz
+    }
+
+    const charges = {};
     groupStudents.forEach((s) => { charges[s.id] = []; });
-    const dateEntries = []; // { dateIso, isHoliday, note }
+    const dateEntries = [];
     let heldCount = 0;
 
-    dates.forEach((d) => {
-      const dateIso = isoDate(d);
-      const entry = attendance[`${groupId}__${dateIso}`] || { cancelled: false, present: {} };
-      if (entry.cancelled) return;
-      heldCount++;
-      const holiday = isBavarianHoliday(dateIso);
-      let note = "";
-      if (holiday) {
-        groupStudents.filter((s) => !s.is_schoolchild).forEach((s) => charges[s.id].push(flatShare));
-        const attendingSchoolchildren = groupStudents.filter((s) => s.is_schoolchild && entry.present[s.id]);
-        if (attendingSchoolchildren.length > 0) {
-          const share = slotCost / attendingSchoolchildren.length;
-          attendingSchoolchildren.forEach((s) => charges[s.id].push(share));
+    monthList.forEach(({ year, monthIdx }) => {
+      datesForMonth(year, monthIdx, group.weekday).forEach((d) => {
+        const originalDateIso = isoDate(d);
+        const entry = attendance[`${groupId}__${originalDateIso}`] || { cancelled: false, present: {}, moved_to: null };
+        if (entry.cancelled) return;
+        const effectiveIso = entry.moved_to || originalDateIso;
+        heldCount++;
+        const holiday = isBavarianHoliday(effectiveIso);
+        let note = "";
+        if (holiday) {
+          groupStudents.filter((s) => !s.is_schoolchild).forEach((s) => charges[s.id].push(flatShare));
+          const attendingSchoolchildren = groupStudents.filter((s) => s.is_schoolchild && entry.present[s.id]);
+          if (attendingSchoolchildren.length > 0) {
+            const share = slotCost / attendingSchoolchildren.length;
+            attendingSchoolchildren.forEach((s) => charges[s.id].push(share));
+          }
+          if (schoolchildCount > 0) {
+            note = attendingSchoolchildren.length > 0 ? attendingSchoolchildren.map((s) => s.name).join(", ") : "niemand von den Schulkindern";
+          }
+        } else {
+          groupStudents.forEach((s) => charges[s.id].push(flatShare));
         }
-        if (schoolchildCount > 0) {
-          note = attendingSchoolchildren.length > 0 ? attendingSchoolchildren.map((s) => s.name).join(", ") : "niemand von den Schulkindern";
-        }
-      } else {
-        groupStudents.forEach((s) => charges[s.id].push(flatShare));
-      }
-      dateEntries.push({ dateIso, holiday, note });
+        dateEntries.push({ dateIso: effectiveIso, holiday, note, monthIdx, year });
+      });
     });
+    dateEntries.sort((a, b) => a.dateIso.localeCompare(b.dateIso));
 
     const studentsOut = groupStudents.map((s) => {
       const amounts = charges[s.id];
       const total = amounts.reduce((sum, a) => sum + a, 0);
-      // Gleiche Beträge zu "X€ * Anzahl"-Termen zusammenfassen, in Reihenfolge des ersten Auftretens.
       const order = [];
       const counts = new Map();
       amounts.forEach((a) => {
@@ -203,8 +219,10 @@ export default function Home() {
     const record = {
       group_id: groupId,
       group_name: group.name,
-      year,
-      month_idx: monthIdx,
+      year: fromYear,
+      month_idx: fromMonthIdx,
+      to_year: toYear,
+      to_month_idx: toMonthIdx,
       held_count: heldCount,
       student_count: studentCount,
       total,
@@ -229,7 +247,7 @@ export default function Home() {
           groupId={trainingGroupId} setGroupId={setTrainingGroupId}
           year={trainingYear} monthIdx={trainingMonth}
           setYear={setTrainingYear} setMonthIdx={setTrainingMonth}
-          onToggleCancel={toggleCancelled} onTogglePresent={togglePresent}
+          onToggleCancel={toggleCancelled} onTogglePresent={togglePresent} onSetMovedDate={setMovedDate}
         />
       )}
       {tab === "schueler" && (
@@ -242,8 +260,10 @@ export default function Home() {
         <InvoicesTab
           groups={groups} biller={biller} onSaveBiller={saveBiller}
           groupId={invoiceGroupId} setGroupId={setInvoiceGroupId}
-          year={invoiceYear} monthIdx={invoiceMonth}
-          setYear={setInvoiceYear} setMonthIdx={setInvoiceMonth}
+          fromYear={invoiceFromYear} fromMonthIdx={invoiceFromMonth}
+          toYear={invoiceToYear} toMonthIdx={invoiceToMonth}
+          setFromYear={setInvoiceFromYear} setFromMonthIdx={setInvoiceFromMonth}
+          setToYear={setInvoiceToYear} setToMonthIdx={setInvoiceToMonth}
           onGenerate={generateInvoice}
           current={currentInvoice} setCurrent={setCurrentInvoice}
           invoices={invoices}
@@ -387,7 +407,10 @@ function GroupsTab({ groups, students, onAdd, onDelete }) {
   );
 }
 
-function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, monthIdx, setYear, setMonthIdx, onToggleCancel, onTogglePresent }) {
+function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, monthIdx, setYear, setMonthIdx, onToggleCancel, onTogglePresent, onSetMovedDate }) {
+  const [movingDate, setMovingDate] = useState(null);
+  const [moveValue, setMoveValue] = useState("");
+
   if (groups.length === 0) return <div className="empty">Lege zuerst eine Gruppe an (Tab „Gruppen").</div>;
   const group = groups.find((g) => g.id === groupId) || groups[0];
   const groupStudents = students.filter((s) => s.group_id === group.id);
@@ -414,16 +437,39 @@ function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, 
       {dates.length === 0 && <div className="empty">Kein passender Wochentag in diesem Monat.</div>}
       {dates.map((d) => {
         const dateIso = isoDate(d);
-        const entry = attendance[`${group.id}__${dateIso}`] || { cancelled: false, present: {} };
-        const dateLabel = d.toLocaleDateString("de-DE", { weekday: "short", day: "2-digit", month: "2-digit" });
+        const entry = attendance[`${group.id}__${dateIso}`] || { cancelled: false, present: {}, moved_to: null };
+        const effectiveIso = entry.moved_to || dateIso;
+        const effectiveLabel = new Date(effectiveIso + "T00:00:00").toLocaleDateString("de-DE", { weekday: "short", day: "2-digit", month: "2-digit" });
+        const isMoving = movingDate === dateIso;
         return (
           <div key={dateIso} className="card" style={{ marginBottom: 8, opacity: entry.cancelled ? 0.55 : 1 }}>
             <div className="row" style={{ marginBottom: 8 }}>
-              <div style={{ fontWeight: 500 }}>{dateLabel}</div>
-              <button className="tag" style={{ background: "none", border: "none", cursor: "pointer", color: entry.cancelled ? "var(--clay)" : "var(--chalk-dim)" }} onClick={() => onToggleCancel(group.id, dateIso)}>
-                {entry.cancelled ? "Ausgefallen ✕ (wieder aktivieren)" : "Als ausgefallen markieren"}
-              </button>
+              <div style={{ fontWeight: 500 }}>
+                {effectiveLabel}
+                {entry.moved_to && <span className="tag" style={{ marginLeft: 6 }}>verschoben von {dateLabel(dateIso)}</span>}
+              </div>
+              <div className="gap2">
+                <button className="tag" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--chalk-dim)" }}
+                  onClick={() => { setMovingDate(isMoving ? null : dateIso); setMoveValue(effectiveIso); }}>
+                  Datum ändern
+                </button>
+                <button className="tag" style={{ background: "none", border: "none", cursor: "pointer", color: entry.cancelled ? "var(--clay)" : "var(--chalk-dim)" }} onClick={() => onToggleCancel(group.id, dateIso)}>
+                  {entry.cancelled ? "Ausgefallen ✕ (wieder aktivieren)" : "Als ausgefallen markieren"}
+                </button>
+              </div>
             </div>
+            {isMoving && (
+              <div className="gap2" style={{ marginBottom: 10, alignItems: "center" }}>
+                <input type="date" value={moveValue} onChange={(e) => setMoveValue(e.target.value)} style={{ flex: 1 }} />
+                <button className="btn-primary" style={{ width: "auto", padding: "8px 14px" }} onClick={() => { onSetMovedDate(group.id, dateIso, moveValue === dateIso ? null : moveValue); setMovingDate(null); }}>OK</button>
+                {entry.moved_to && (
+                  <button className="btn-primary" style={{ width: "auto", padding: "8px 14px", background: "var(--surface2)", color: "var(--chalk)" }}
+                    onClick={() => { onSetMovedDate(group.id, dateIso, null); setMovingDate(null); }}>
+                    Zurücksetzen
+                  </button>
+                )}
+              </div>
+            )}
             {!entry.cancelled && (groupStudents.length ? (
               <div className="gap2" style={{ flexWrap: "wrap" }}>
                 {groupStudents.map((s) => {
@@ -439,12 +485,12 @@ function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, 
           </div>
         );
       })}
-      <div className="tag" style={{ marginTop: 12 }}>Anwesenheit dient nur der Dokumentation und wirkt sich nicht auf die Rechnung aus.</div>
+      <div className="tag" style={{ marginTop: 12 }}>Anwesenheit dient nur der Dokumentation und wirkt sich nicht auf die Rechnung aus. Ein verschobenes Datum wird für die Rechnung (inkl. Ferienprüfung) am neuen Termin gezählt.</div>
     </div>
   );
 }
 
-function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, year, monthIdx, setYear, setMonthIdx, onGenerate, current, setCurrent, invoices }) {
+function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, fromYear, fromMonthIdx, toYear, toMonthIdx, setFromYear, setFromMonthIdx, setToYear, setToMonthIdx, onGenerate, current, setCurrent, invoices }) {
   const [billerName, setBillerName] = useState(biller.name);
   const [billerAddress, setBillerAddress] = useState(biller.address);
   const [paymentInfo, setPaymentInfo] = useState(biller.paymentInfo);
@@ -452,6 +498,7 @@ function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, year, 
   const persistBiller = () => onSaveBiller(billerName, billerAddress, paymentInfo);
 
   const activeGroupId = groupId || groups[0]?.id;
+  const rangeInvalid = toYear < fromYear || (toYear === fromYear && toMonthIdx < fromMonthIdx);
 
   return (
     <div>
@@ -467,14 +514,23 @@ function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, year, 
             {groups.map((g) => <option key={g.id} value={g.id}>{groupLabel(g)}</option>)}
           </select>
         )}
+        <div className="tag">Von</div>
         <div className="gap2">
-          <select value={monthIdx} onChange={(e) => setMonthIdx(Number(e.target.value))} style={{ flex: 2 }}>
+          <select value={fromMonthIdx} onChange={(e) => setFromMonthIdx(Number(e.target.value))} style={{ flex: 2 }}>
             {MONTHS.map((m, i) => <option key={m} value={i}>{m}</option>)}
           </select>
-          <input type="number" value={year} onChange={(e) => setYear(Number(e.target.value))} style={{ flex: 1 }} />
+          <input type="number" value={fromYear} onChange={(e) => setFromYear(Number(e.target.value))} style={{ flex: 1 }} />
         </div>
-        <button className="btn-primary" disabled={groups.length === 0} onClick={() => onGenerate(activeGroupId, year, monthIdx)}>⬇ PDF-Rechnung erstellen</button>
-        <div className="tag">Erstellt eine gemeinsame PDF für die ganze Gruppe und lädt sie direkt herunter.</div>
+        <div className="tag">Bis (einschließlich)</div>
+        <div className="gap2">
+          <select value={toMonthIdx} onChange={(e) => setToMonthIdx(Number(e.target.value))} style={{ flex: 2 }}>
+            {MONTHS.map((m, i) => <option key={m} value={i}>{m}</option>)}
+          </select>
+          <input type="number" value={toYear} onChange={(e) => setToYear(Number(e.target.value))} style={{ flex: 1 }} />
+        </div>
+        {rangeInvalid && <div className="tag" style={{ color: "var(--clay)" }}>„Bis" darf nicht vor „Von" liegen.</div>}
+        <button className="btn-primary" disabled={groups.length === 0 || rangeInvalid} onClick={() => onGenerate(activeGroupId, fromYear, fromMonthIdx, toYear, toMonthIdx)}>⬇ PDF-Rechnung erstellen</button>
+        <div className="tag">Für nur einen Monat einfach bei „Von" und „Bis" denselben Monat wählen. Erstellt eine gemeinsame PDF für die ganze Gruppe.</div>
       </div>
 
       {current && <InvoiceView invoice={current} biller={biller} />}
@@ -484,12 +540,19 @@ function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, year, 
       {invoices.length === 0 && <div className="empty">Noch keine Rechnungen erstellt.</div>}
       {invoices.map((inv) => (
         <button key={inv.id} className="card" style={{ textAlign: "left", width: "100%", marginBottom: 8, cursor: "pointer" }} onClick={() => setCurrent(inv)}>
-          <div style={{ fontWeight: 500 }}>{inv.group_name} — {MONTHS[inv.month_idx]} {inv.year}</div>
+          <div style={{ fontWeight: 500 }}>{inv.group_name} — {periodLabel(inv)}</div>
           <div className="tag">{inv.held_count} Trainings · Gesamt {fmtEUR(inv.total)}</div>
         </button>
       ))}
     </div>
   );
+}
+
+function periodLabel(inv) {
+  const toY = inv.to_year ?? inv.year;
+  const toM = inv.to_month_idx ?? inv.month_idx;
+  if (toY === inv.year && toM === inv.month_idx) return `${MONTHS[inv.month_idx]} ${inv.year}`;
+  return `${MONTHS[inv.month_idx]} ${inv.year} – ${MONTHS[toM]} ${toY}`;
 }
 
 function dateLabel(dateIso) {
@@ -501,7 +564,7 @@ function InvoiceView({ invoice, biller }) {
   const dates = invoice.dates || [];
   return (
     <div className="card" style={{ marginTop: 16 }}>
-      <div className="disp" style={{ fontSize: 16, marginBottom: 10 }}>{invoice.group_name} — {MONTHS[invoice.month_idx]} {invoice.year}</div>
+      <div className="disp" style={{ fontSize: 16, marginBottom: 10 }}>{invoice.group_name} — {periodLabel(invoice)}</div>
       <div className="tag" style={{ marginBottom: 6 }}>Trainings ({dates.length}):</div>
       <div style={{ fontSize: 14, marginBottom: 10 }}>
         {dates.map((d) => (
@@ -527,9 +590,9 @@ function downloadInvoicePdf(inv, biller) {
     const doc = new jsPDF({ unit: "mm", format: "a4" });
     const pageWidth = 210;
     const center = pageWidth / 2;
-    const monthIdx = inv.month_idx ?? inv.monthIdx;
     const dates = inv.dates || [];
     let y = 25;
+    const isMultiMonth = periodLabel(inv).includes("–");
 
     const logoWidth = 45;
     const logoHeight = logoWidth * (249 / 500);
@@ -538,8 +601,20 @@ function downloadInvoicePdf(inv, biller) {
     doc.setFont("helvetica", "normal"); doc.setFontSize(12);
     doc.text("Hallöchen,", 20, y); y += 12;
 
-    doc.text(`im Monat ${MONTHS[monthIdx]} fanden ${dates.length} Trainingseinheiten statt, und zwar am`, 20, y, { maxWidth: 170 }); y += 8;
+    const introText = isMultiMonth
+      ? `im Zeitraum ${periodLabel(inv)} fanden ${dates.length} Trainingseinheiten statt, und zwar am`
+      : `im Monat ${MONTHS[inv.month_idx]} ${inv.year} fanden ${dates.length} Trainingseinheiten statt, und zwar am`;
+    doc.text(introText, 20, y, { maxWidth: 170 }); y += 8;
+
+    let lastMonthKey = null;
     dates.forEach((d) => {
+      const monthKey = `${d.year}-${d.monthIdx}`;
+      if (isMultiMonth && monthKey !== lastMonthKey) {
+        doc.setFont("helvetica", "bold");
+        doc.text(`${MONTHS[d.monthIdx]} ${d.year}:`, 24, y); y += 7;
+        doc.setFont("helvetica", "normal");
+        lastMonthKey = monthKey;
+      }
       const suffix = d.holiday && d.note ? ` (${d.note})` : "";
       doc.text(`•  ${dateLabel(d.dateIso)}${suffix}`, 26, y);
       y += 7;
@@ -548,7 +623,10 @@ function downloadInvoicePdf(inv, biller) {
 
     doc.text(`Es handelt sich um eine ${inv.student_count ?? (inv.students || []).length}er Gruppe.`, 20, y); y += 12;
 
-    doc.text(`Die Kosten für den Monat ${MONTHS[monthIdx]} belaufen sich auf:`, 20, y); y += 12;
+    const costLine = isMultiMonth
+      ? `Die Kosten für den Zeitraum ${periodLabel(inv)} belaufen sich auf:`
+      : `Die Kosten für den Monat ${MONTHS[inv.month_idx]} belaufen sich auf:`;
+    doc.text(costLine, 20, y); y += 12;
 
     doc.setFont("helvetica", "italic");
     (inv.students || []).forEach((s) => {
@@ -567,6 +645,9 @@ function downloadInvoicePdf(inv, biller) {
     doc.text("Viele Grüße und ein Dankeschön", 20, y); y += 14;
     if (biller?.name) doc.text(biller.name, 20, y);
 
-    doc.save(`Rechnung_${(inv.group_name || "").replace(/\s+/g, "_")}_${MONTHS[monthIdx]}_${inv.year}.pdf`);
+    const toM = inv.to_month_idx ?? inv.month_idx;
+    const toY = inv.to_year ?? inv.year;
+    const suffix = (toY === inv.year && toM === inv.month_idx) ? `${MONTHS[inv.month_idx]}_${inv.year}` : `${MONTHS[inv.month_idx]}${inv.year}-${MONTHS[toM]}${toY}`;
+    doc.save(`Rechnung_${(inv.group_name || "").replace(/\s+/g, "_")}_${suffix}.pdf`);
   });
 }
