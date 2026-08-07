@@ -65,15 +65,20 @@ export default function Home() {
   const [currentInvoice, setCurrentInvoice] = useState(null);
 
   const loadAll = useCallback(async () => {
-    const [g, s, a, inv, b] = await Promise.all([
+    const [g, s, sg, a, inv, b] = await Promise.all([
       supabase.from("groups").select("*").order("name"),
       supabase.from("students").select("*").order("name"),
+      supabase.from("student_groups").select("*"),
       supabase.from("attendance").select("*"),
       supabase.from("invoices").select("*").order("generated_at", { ascending: false }),
       supabase.from("biller").select("*").eq("id", 1).maybeSingle(),
     ]);
     setGroups(g.data || []);
-    setStudents(s.data || []);
+    const groupIdsByStudent = {};
+    (sg.data || []).forEach((row) => {
+      (groupIdsByStudent[row.student_id] ||= []).push(row.group_id);
+    });
+    setStudents((s.data || []).map((st) => ({ ...st, group_ids: groupIdsByStudent[st.id] || [] })));
     const attMap = {};
     (a.data || []).forEach((row) => {
       attMap[`${row.group_id}__${row.date}`] = row;
@@ -91,18 +96,27 @@ export default function Home() {
   }, [groups]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- Schüler ----
-  const addStudent = async (name, groupId, isSchoolchild) => {
+  const addStudent = async (name, groupIds, isSchoolchild) => {
     if (!name.trim()) return;
-    const { data } = await supabase.from("students").insert({ name: name.trim(), group_id: groupId || null, is_schoolchild: isSchoolchild }).select();
-    if (data) setStudents((prev) => [...prev, ...data].sort((x, y) => x.name.localeCompare(y.name)));
+    const { data } = await supabase.from("students").insert({ name: name.trim(), is_schoolchild: isSchoolchild }).select();
+    const student = data && data[0];
+    if (!student) return;
+    if (groupIds.length > 0) {
+      await supabase.from("student_groups").insert(groupIds.map((gid) => ({ student_id: student.id, group_id: gid })));
+    }
+    setStudents((prev) => [...prev, { ...student, group_ids: groupIds }].sort((x, y) => x.name.localeCompare(y.name)));
   };
   const delStudent = async (id) => {
     await supabase.from("students").delete().eq("id", id);
     setStudents((prev) => prev.filter((s) => s.id !== id));
   };
-  const updateStudent = async (id, patch) => {
-    const { data } = await supabase.from("students").update(patch).eq("id", id).select().maybeSingle();
-    setStudents((prev) => prev.map((s) => (s.id === id ? (data || { ...s, ...patch }) : s)).sort((x, y) => x.name.localeCompare(y.name)));
+  const updateStudent = async (id, { name, is_schoolchild, groupIds }) => {
+    const { data } = await supabase.from("students").update({ name, is_schoolchild }).eq("id", id).select().maybeSingle();
+    await supabase.from("student_groups").delete().eq("student_id", id);
+    if (groupIds.length > 0) {
+      await supabase.from("student_groups").insert(groupIds.map((gid) => ({ student_id: id, group_id: gid })));
+    }
+    setStudents((prev) => prev.map((s) => (s.id === id ? { ...s, ...(data || { name, is_schoolchild }), group_ids: groupIds } : s)).sort((x, y) => x.name.localeCompare(y.name)));
   };
 
   // ---- Gruppen ----
@@ -150,7 +164,7 @@ export default function Home() {
   const generateInvoice = async (groupId, fromYear, fromMonthIdx, toYear, toMonthIdx) => {
     const group = groups.find((g) => g.id === groupId);
     if (!group) return;
-    const groupStudents = students.filter((s) => s.group_id === groupId);
+    const groupStudents = students.filter((s) => (s.group_ids || []).includes(groupId));
     const studentCount = groupStudents.length;
     const slotCost = HOURLY_RATE * (group.duration / 60);
     const flatShare = studentCount > 0 ? slotCost / studentCount : 0;
@@ -297,27 +311,45 @@ function Nav({ tab, setTab }) {
   );
 }
 
+function GroupChecklist({ groups, selected, onToggle }) {
+  return (
+    <div className="gap2" style={{ flexWrap: "wrap" }}>
+      {groups.map((g) => {
+        const on = selected.includes(g.id);
+        return (
+          <button key={g.id} type="button" className={`pill ${on ? "on" : ""}`} onClick={() => onToggle(g.id)}>
+            {on ? "✓" : "✕"} {groupLabel(g)}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function StudentsTab({ students, groups, onAdd, onDelete, onUpdate }) {
   const [name, setName] = useState("");
-  const [groupId, setGroupId] = useState("");
+  const [groupIds, setGroupIds] = useState([]);
   const [isSchoolchild, setIsSchoolchild] = useState(true);
   const [editingId, setEditingId] = useState(null);
+
+  const toggleGroup = (gid) => {
+    setGroupIds((prev) => (prev.includes(gid) ? prev.filter((id) => id !== gid) : [...prev, gid]));
+  };
 
   return (
     <div>
       <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Schüler anlegen</div>
       <div className="card col">
         <input placeholder="Name des Schülers" value={name} onChange={(e) => setName(e.target.value)} />
-        <select value={groupId} onChange={(e) => setGroupId(e.target.value)}>
-          <option value="">— keine Gruppe —</option>
-          {groups.map((g) => <option key={g.id} value={g.id}>{groupLabel(g)}</option>)}
-        </select>
+        <div className="tag">Gruppen (mehrere möglich, z. B. Gruppentraining + Einzeltraining)</div>
+        {groups.length === 0 ? <div className="tag" style={{ color: "var(--clay)" }}>Lege zuerst eine Gruppe an (Tab „Gruppen").</div> : (
+          <GroupChecklist groups={groups} selected={groupIds} onToggle={toggleGroup} />
+        )}
         <label className="row" style={{ cursor: "pointer" }}>
           <span className="tag" style={{ fontSize: 13, textTransform: "none", letterSpacing: 0 }}>Geht noch zur Schule (betrifft Ferienregelung)</span>
           <input type="checkbox" style={{ width: "auto" }} checked={isSchoolchild} onChange={(e) => setIsSchoolchild(e.target.checked)} />
         </label>
-        <button className="btn-primary" onClick={() => { onAdd(name, groupId, isSchoolchild); setName(""); }}>+ Schüler hinzufügen</button>
-        {groups.length === 0 && <div className="tag" style={{ color: "var(--clay)" }}>Lege zuerst eine Gruppe an (Tab „Gruppen").</div>}
+        <button className="btn-primary" onClick={() => { onAdd(name, groupIds, isSchoolchild); setName(""); setGroupIds([]); }}>+ Schüler hinzufügen</button>
       </div>
       <div className="net-divider" />
       <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Alle Schüler ({students.length})</div>
@@ -330,7 +362,10 @@ function StudentsTab({ students, groups, onAdd, onDelete, onUpdate }) {
           <div key={s.id} className="card row" style={{ marginBottom: 8 }}>
             <div>
               <div style={{ fontWeight: 500 }}>{s.name}</div>
-              <div className="tag">{(groups.find((g) => g.id === s.group_id)?.name) || "— keine Gruppe —"} · {s.is_schoolchild ? "Schüler" : "Kein Schüler"}</div>
+              <div className="tag">
+                {(s.group_ids || []).length > 0 ? s.group_ids.map((gid) => groups.find((g) => g.id === gid)?.name).filter(Boolean).join(", ") : "— keine Gruppe —"}
+                {" · "}{s.is_schoolchild ? "Schüler" : "Kein Schüler"}
+              </div>
             </div>
             <div className="gap2">
               <button className="icon-btn" style={{ color: "var(--chalk-dim)" }} onClick={() => setEditingId(s.id)}>✎</button>
@@ -345,21 +380,22 @@ function StudentsTab({ students, groups, onAdd, onDelete, onUpdate }) {
 
 function EditStudentCard({ student, groups, onSave, onCancel }) {
   const [name, setName] = useState(student.name);
-  const [groupId, setGroupId] = useState(student.group_id || "");
+  const [groupIds, setGroupIds] = useState(student.group_ids || []);
   const [isSchoolchild, setIsSchoolchild] = useState(!!student.is_schoolchild);
+  const toggleGroup = (gid) => {
+    setGroupIds((prev) => (prev.includes(gid) ? prev.filter((id) => id !== gid) : [...prev, gid]));
+  };
   return (
     <div className="card col" style={{ marginBottom: 8, borderColor: "var(--ball)" }}>
       <input placeholder="Name des Schülers" value={name} onChange={(e) => setName(e.target.value)} />
-      <select value={groupId} onChange={(e) => setGroupId(e.target.value)}>
-        <option value="">— keine Gruppe —</option>
-        {groups.map((g) => <option key={g.id} value={g.id}>{groupLabel(g)}</option>)}
-      </select>
+      <div className="tag">Gruppen (mehrere möglich)</div>
+      <GroupChecklist groups={groups} selected={groupIds} onToggle={toggleGroup} />
       <label className="row" style={{ cursor: "pointer" }}>
         <span className="tag" style={{ fontSize: 13, textTransform: "none", letterSpacing: 0 }}>Geht noch zur Schule (betrifft Ferienregelung)</span>
         <input type="checkbox" style={{ width: "auto" }} checked={isSchoolchild} onChange={(e) => setIsSchoolchild(e.target.checked)} />
       </label>
       <div className="gap2">
-        <button className="btn-primary" style={{ flex: 1 }} onClick={() => onSave({ name: name.trim(), group_id: groupId || null, is_schoolchild: isSchoolchild })}>Speichern</button>
+        <button className="btn-primary" style={{ flex: 1 }} onClick={() => onSave({ name: name.trim(), groupIds, is_schoolchild: isSchoolchild })}>Speichern</button>
         <button className="btn-primary" style={{ flex: 1, background: "var(--surface2)", color: "var(--chalk)" }} onClick={onCancel}>Abbrechen</button>
       </div>
     </div>
@@ -392,7 +428,7 @@ function GroupsTab({ groups, students, onAdd, onDelete }) {
       <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Alle Gruppen ({groups.length})</div>
       {groups.length === 0 && <div className="empty">Noch keine Gruppen angelegt.</div>}
       {groups.map((g) => {
-        const count = students.filter((s) => s.group_id === g.id).length;
+        const count = students.filter((s) => (s.group_ids || []).includes(g.id)).length;
         return (
           <div key={g.id} className="card row" style={{ marginBottom: 8 }}>
             <div>
@@ -413,7 +449,7 @@ function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, 
 
   if (groups.length === 0) return <div className="empty">Lege zuerst eine Gruppe an (Tab „Gruppen").</div>;
   const group = groups.find((g) => g.id === groupId) || groups[0];
-  const groupStudents = students.filter((s) => s.group_id === group.id);
+  const groupStudents = students.filter((s) => (s.group_ids || []).includes(group.id));
   const dates = datesForMonth(year, monthIdx, group.weekday);
 
   const shiftMonth = (delta) => {
