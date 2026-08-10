@@ -26,6 +26,7 @@ body {
   background-image: repeating-linear-gradient(90deg, var(--line) 0 10px, transparent 10px 18px);
   margin: 18px 0;
 }
+button { color: inherit; font: inherit; text-align: inherit; }
 input, select {
   background: var(--surface2);
   border: 1px solid var(--line);
