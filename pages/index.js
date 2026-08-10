@@ -15,6 +15,17 @@ function groupLabel(g) {
   return `${g.name} — ${WEEKDAYS[g.weekday]} ${g.time}`;
 }
 
+// Erzeugt clientseitig eine garantiert eindeutige ID, damit eine Rechnung nie ohne
+// (oder mit doppelter) ID im lokalen Zustand landet, selbst wenn der Speichervorgang
+// beim Zurücklesen aus der Datenbank einmal ins Leere läuft.
+function newUuid() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+  });
+}
+
 // Offizielle bayerische Schulferien (Kultusministerium). Muss jährlich ergänzt werden,
 // sobald neue Termine veröffentlicht sind: https://www.km.bayern.de/termine/ferien-und-feiertage
 const BAVARIAN_HOLIDAYS = [
@@ -271,6 +282,7 @@ export default function Home() {
     const studentsOutWithPaid = studentsOut.map((s) => (oldPaidById[s.id] ? { ...s, paid: true } : s));
 
     const record = {
+      id: newUuid(),
       group_id: groupId,
       group_name: group.name,
       year: fromYear,
@@ -282,13 +294,14 @@ export default function Home() {
       total,
       students: studentsOutWithPaid,
       dates: dateEntries,
+      generated_at: new Date().toISOString(),
     };
 
     if (overlapping.length > 0) {
       await supabase.from("invoices").delete().in("id", overlapping.map((i) => i.id));
     }
     const { data } = await supabase.from("invoices").insert(record).select().maybeSingle();
-    const invoice = data || { ...record, generated_at: new Date().toISOString() };
+    const invoice = data || record;
     const overlappingIds = new Set(overlapping.map((i) => i.id));
     setInvoices((prev) => [invoice, ...prev.filter((i) => !overlappingIds.has(i.id))]);
     setCurrentInvoice(invoice);
