@@ -9,6 +9,7 @@
   --chalk-dim: #b9c9d1;
   --ball: #d7f22c;
   --clay: #c1552e;
+  --paid-green: #4ade80;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
