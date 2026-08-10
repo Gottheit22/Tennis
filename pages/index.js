@@ -74,6 +74,7 @@ export default function Home() {
   const [invoiceToYear, setInvoiceToYear] = useState(new Date().getFullYear());
   const [invoiceToMonth, setInvoiceToMonth] = useState(new Date().getMonth());
   const [currentInvoice, setCurrentInvoice] = useState(null);
+  const [invoiceError, setInvoiceError] = useState(null);
 
   const loadAll = useCallback(async () => {
     const [g, s, sg, a, inv, b] = await Promise.all([
@@ -297,10 +298,16 @@ export default function Home() {
       generated_at: new Date().toISOString(),
     };
 
+    const { data, error } = await supabase.from("invoices").insert(record).select().maybeSingle();
+    if (error) {
+      console.error("Rechnung speichern fehlgeschlagen:", error);
+      setInvoiceError(`Speichern fehlgeschlagen: ${error.message}`);
+      return;
+    }
+    setInvoiceError(null);
     if (overlapping.length > 0) {
       await supabase.from("invoices").delete().in("id", overlapping.map((i) => i.id));
     }
-    const { data } = await supabase.from("invoices").insert(record).select().maybeSingle();
     const invoice = data || record;
     const overlappingIds = new Set(overlapping.map((i) => i.id));
     setInvoices((prev) => [invoice, ...prev.filter((i) => !overlappingIds.has(i.id))]);
@@ -349,6 +356,7 @@ export default function Home() {
           current={currentInvoice} setCurrent={setCurrentInvoice}
           invoices={invoices}
           onTogglePaid={togglePaid}
+          errorMessage={invoiceError}
         />
       )}
       {tab === "offen" && <OpenPaymentsTab invoices={invoices} onTogglePaid={togglePaid} />}
@@ -636,7 +644,7 @@ function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, 
   );
 }
 
-function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, fromYear, fromMonthIdx, toYear, toMonthIdx, setFromYear, setFromMonthIdx, setToYear, setToMonthIdx, onGenerate, current, setCurrent, invoices, onTogglePaid }) {
+function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, fromYear, fromMonthIdx, toYear, toMonthIdx, setFromYear, setFromMonthIdx, setToYear, setToMonthIdx, onGenerate, current, setCurrent, invoices, onTogglePaid, errorMessage }) {
   const [billerName, setBillerName] = useState(biller.name);
   const [billerAddress, setBillerAddress] = useState(biller.address);
   const [paymentInfo, setPaymentInfo] = useState(biller.paymentInfo);
@@ -684,6 +692,11 @@ function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, fromYe
         </div>
         {rangeInvalid && <div className="tag" style={{ color: "var(--clay)" }}>„Bis" darf nicht vor „Von" liegen.</div>}
         {willOverlap && <div className="tag" style={{ color: "var(--clay)" }}>Überschneidet sich mit einer bestehenden Rechnung – die wird beim Erstellen automatisch durch die neu berechnete ersetzt.</div>}
+        {errorMessage && (
+          <div className="tag" style={{ color: "var(--clay)", background: "rgba(193,85,46,0.15)", padding: "8px 10px", borderRadius: 8 }}>
+            ⚠ {errorMessage}
+          </div>
+        )}
         <button className="btn-primary" disabled={groups.length === 0 || rangeInvalid} onClick={() => onGenerate(activeGroupId, fromYear, fromMonthIdx, toYear, toMonthIdx)}>⬇ PDF-Rechnung erstellen</button>
         <div className="tag">Für nur einen Monat einfach bei „Von" und „Bis" denselben Monat wählen. Erstellt eine gemeinsame PDF für die ganze Gruppe.</div>
       </div>
