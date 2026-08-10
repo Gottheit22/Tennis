@@ -268,7 +268,7 @@ export default function Home() {
         const count = counts.get(key);
         return count > 1 ? `${fmtEUR(amount)} × ${count}` : fmtEUR(amount);
       }).join(" + ");
-      return { id: s.id, name: s.name, total, formula: formula || fmtEUR(0) };
+      return { id: s.id, name: s.name, total, formula: formula || fmtEUR(0), count: amounts.length };
     });
     const total = studentsOut.reduce((sum, s) => sum + s.total, 0);
 
@@ -640,6 +640,7 @@ function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, fromYe
   const [billerName, setBillerName] = useState(biller.name);
   const [billerAddress, setBillerAddress] = useState(biller.address);
   const [paymentInfo, setPaymentInfo] = useState(biller.paymentInfo);
+  const [expandedPeriodId, setExpandedPeriodId] = useState(null);
   useEffect(() => { setBillerName(biller.name); setBillerAddress(biller.address); setPaymentInfo(biller.paymentInfo); }, [biller]);
   const persistBiller = () => onSaveBiller(billerName, billerAddress, paymentInfo);
 
@@ -702,14 +703,42 @@ function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, fromYe
             <div style={{ fontWeight: 500, marginBottom: 8 }}>{g.name}</div>
             <div className="col" style={{ gap: 6 }}>
               {periods.map((inv) => {
-                const openCount = (inv.students || []).filter((s) => !s.paid).length;
+                const unpaid = (inv.students || []).map((s, idx) => ({ ...s, idx })).filter((s) => !s.paid);
+                const expanded = expandedPeriodId === inv.id;
                 return (
-                  <button key={inv.id} className="row" style={{ background: "var(--surface2)", border: "1px solid var(--line)", borderRadius: 8, padding: "8px 10px", cursor: "pointer", width: "100%" }} onClick={() => setCurrent(inv)}>
-                    <span style={{ fontSize: 14 }}>{periodLabel(inv)}</span>
-                    <span className="tag" style={{ color: openCount > 0 ? "var(--clay)" : "var(--ball-dim)" }}>
-                      {fmtEUR(inv.total)} · {openCount > 0 ? `${openCount} offen` : "bezahlt"}
-                    </span>
-                  </button>
+                  <div key={inv.id} style={{ background: "var(--surface2)", border: "1px solid var(--line)", borderRadius: 8, padding: "8px 10px" }}>
+                    <button className="row" style={{ background: "none", border: "none", cursor: "pointer", width: "100%", padding: 0 }}
+                      onClick={() => setExpandedPeriodId(expanded ? null : inv.id)}>
+                      <span style={{ fontSize: 14 }}>{periodLabel(inv)}</span>
+                      <span className="tag" style={{ color: unpaid.length > 0 ? "var(--clay)" : "var(--paid-green)" }}>
+                        {fmtEUR(inv.total)} · {unpaid.length > 0 ? `${unpaid.length} offen` : "bezahlt"}
+                      </span>
+                    </button>
+                    {expanded && (
+                      <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--line)" }}>
+                        {unpaid.length === 0 ? (
+                          <div className="tag" style={{ color: "var(--paid-green)" }}>Alle Schüler haben bezahlt.</div>
+                        ) : (
+                          <div className="col" style={{ gap: 6 }}>
+                            {unpaid.map((s) => (
+                              <div key={s.idx} className="row">
+                                <span style={{ fontSize: 13 }}>{s.name}</span>
+                                <div className="gap2" style={{ alignItems: "center" }}>
+                                  <span style={{ fontSize: 13, color: "var(--clay)" }}>{fmtEUR(s.total)}</span>
+                                  <button className="pill" style={{ fontSize: 11, padding: "4px 8px" }} onClick={() => onTogglePaid(inv.id, s.idx, true)}>
+                                    ✓ bezahlt
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        <button className="tag" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--chalk-dim)", marginTop: 8 }} onClick={() => setCurrent(inv)}>
+                          Volle Rechnung anzeigen →
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 );
               })}
             </div>
@@ -728,7 +757,7 @@ function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, fromYe
             <div className="tag">
               {inv.held_count} Trainings · Gesamt {fmtEUR(inv.total)}
               {" · "}
-              <span style={{ color: openCount > 0 ? "var(--clay)" : "var(--ball-dim)" }}>{openCount > 0 ? `${openCount} offen` : "alle bezahlt"}</span>
+              <span style={{ color: openCount > 0 ? "var(--clay)" : "var(--paid-green)" }}>{openCount > 0 ? `${openCount} offen` : "alle bezahlt"}</span>
             </div>
           </button>
         );
@@ -800,6 +829,7 @@ function InvoiceView({ invoice, biller, onTogglePaid }) {
 
 function OpenPaymentsTab({ invoices, onTogglePaid }) {
   const [expandedId, setExpandedId] = useState(null);
+  const [expandedOverviewId, setExpandedOverviewId] = useState(null);
 
   const byStudent = new Map();
   invoices.forEach((inv) => {
@@ -814,10 +844,24 @@ function OpenPaymentsTab({ invoices, onTogglePaid }) {
   const openStudents = [...byStudent.values()].sort((a, b) => b.total - a.total);
   const grandTotal = openStudents.reduce((sum, s) => sum + s.total, 0);
 
+  // Vollständige Übersicht: jeder Schüler über alle Rechnungen hinweg (bezahlt + offen).
+  const overviewByStudent = new Map();
+  invoices.forEach((inv) => {
+    (inv.students || []).forEach((s, idx) => {
+      if (!overviewByStudent.has(s.id)) overviewByStudent.set(s.id, { id: s.id, name: s.name, trainings: 0, cost: 0, paid: 0, items: [] });
+      const entry = overviewByStudent.get(s.id);
+      entry.trainings += s.count || 0;
+      entry.cost += s.total;
+      if (s.paid) entry.paid += s.total;
+      entry.items.push({ invoiceId: inv.id, groupName: inv.group_name, period: periodLabel(inv), amount: s.total, trainings: s.count || 0, paid: !!s.paid, lineIndex: idx });
+    });
+  });
+  const overviewStudents = [...overviewByStudent.values()].sort((a, b) => a.name.localeCompare(b.name));
+
   return (
     <div>
       <div className="disp" style={{ fontSize: 18, marginBottom: 4 }}>Offene Zahlungen</div>
-      <div className="tag" style={{ marginBottom: 12 }}>Gesamt offen: <span style={{ color: "var(--ball)" }}>{fmtEUR(grandTotal)}</span></div>
+      <div className="tag" style={{ marginBottom: 12 }}>Gesamt offen: <span style={{ color: "var(--clay)" }}>{fmtEUR(grandTotal)}</span></div>
       {openStudents.length === 0 && <div className="empty">Alles bezahlt. 🎾</div>}
       {openStudents.map((s) => {
         const expanded = expandedId === s.id;
@@ -854,8 +898,48 @@ function OpenPaymentsTab({ invoices, onTogglePaid }) {
           </div>
         );
       })}
+
+      <div className="net-divider" />
+      <div className="disp" style={{ fontSize: 18, marginBottom: 4 }}>Schüler-Übersicht</div>
+      <div className="tag" style={{ marginBottom: 12 }}>Trainings, Kosten, bezahlt und offen — über alle Rechnungen hinweg (unabhängig von Anwesenheit, außer bei Ferientraining).</div>
+      {overviewStudents.length === 0 && <div className="empty">Noch keine Rechnungen erstellt.</div>}
+      {overviewStudents.map((s) => {
+        const open = s.cost - s.paid;
+        const expanded = expandedOverviewId === s.id;
+        return (
+          <div key={s.id} className="card" style={{ marginBottom: 8 }}>
+            <button className="row" style={{ width: "100%", background: "none", border: "none", cursor: "pointer", textAlign: "left" }} onClick={() => setExpandedOverviewId(expanded ? null : s.id)}>
+              <div>
+                <div style={{ fontWeight: 500 }}>{s.name}</div>
+                <div className="tag">{s.trainings} Trainings · {fmtEUR(s.cost)} gesamt</div>
+              </div>
+              <div className="row" style={{ gap: 8 }}>
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ fontSize: 13, color: "var(--paid-green)" }}>{fmtEUR(s.paid)} bezahlt</div>
+                  <div style={{ fontSize: 13, color: open > 0.005 ? "var(--clay)" : "var(--paid-green)" }}>{fmtEUR(open)} offen</div>
+                </div>
+                <span className="tag">{expanded ? "▲" : "▼"}</span>
+              </div>
+            </button>
+            {expanded && (
+              <div style={{ marginTop: 10 }}>
+                <div className="net-divider" style={{ margin: "0 0 10px" }} />
+                <div className="col" style={{ gap: 8 }}>
+                  {s.items.map((it, idx) => (
+                    <div key={idx} className="row">
+                      <span style={{ fontSize: 14 }}>{it.groupName} — {it.period} · {it.trainings} Trainings</span>
+                      <span style={{ fontSize: 13, color: it.paid ? "var(--paid-green)" : "var(--clay)" }}>{fmtEUR(it.amount)} {it.paid ? "✓" : "offen"}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
+
 }
 
 function downloadInvoicePdf(inv, biller) {
