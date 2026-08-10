@@ -388,19 +388,30 @@ function Nav({ tab, setTab }) {
   );
 }
 
-function GroupChecklist({ groups, selected, onToggle }) {
+function GroupMultiSelect({ groups, selected, onToggle }) {
+  const [open, setOpen] = useState(false);
+  const summary = selected.length === 0 ? "— keine Gruppe —" : groups.filter((g) => selected.includes(g.id)).map((g) => g.name).join(", ");
   return (
-    <div className="col" style={{ gap: 6 }}>
-      {groups.map((g) => {
-        const on = selected.includes(g.id);
-        return (
-          <button key={g.id} type="button" className="row" onClick={() => onToggle(g.id)}
-            style={{ background: on ? "rgba(215,242,44,0.1)" : "var(--surface2)", border: `1px solid ${on ? "var(--ball)" : "var(--line)"}`, borderRadius: 8, padding: "10px 12px", cursor: "pointer", width: "100%" }}>
-            <span style={{ color: on ? "var(--ball)" : "var(--chalk)" }}>{groupLabel(g)}</span>
-            <span style={{ color: on ? "var(--ball)" : "var(--chalk-dim)" }}>{on ? "✓" : ""}</span>
-          </button>
-        );
-      })}
+    <div>
+      <button type="button" className="row" onClick={() => setOpen((o) => !o)}
+        style={{ background: "var(--surface2)", border: "1px solid var(--line)", borderRadius: 8, padding: "10px 12px", cursor: "pointer", width: "100%" }}>
+        <span style={{ color: selected.length ? "var(--chalk)" : "var(--chalk-dim)" }}>{summary}</span>
+        <span className="tag">{open ? "▲" : "▼"}</span>
+      </button>
+      {open && (
+        <div className="col" style={{ gap: 6, marginTop: 6 }}>
+          {groups.map((g) => {
+            const on = selected.includes(g.id);
+            return (
+              <button key={g.id} type="button" className="row" onClick={() => onToggle(g.id)}
+                style={{ background: on ? "rgba(215,242,44,0.1)" : "var(--surface2)", border: `1px solid ${on ? "var(--ball)" : "var(--line)"}`, borderRadius: 8, padding: "10px 12px", cursor: "pointer", width: "100%" }}>
+                <span style={{ color: on ? "var(--ball)" : "var(--chalk)" }}>{groupLabel(g)}</span>
+                <span style={{ color: on ? "var(--ball)" : "var(--chalk-dim)" }}>{on ? "✓" : ""}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -422,7 +433,7 @@ function StudentsTab({ students, groups, onAdd, onDelete, onUpdate }) {
         <input placeholder="Name des Schülers" value={name} onChange={(e) => setName(e.target.value)} />
         <div className="tag">Gruppen (mehrere möglich, z. B. Gruppentraining + Einzeltraining)</div>
         {groups.length === 0 ? <div className="tag" style={{ color: "var(--clay)" }}>Lege zuerst eine Gruppe an (Tab „Gruppen").</div> : (
-          <GroupChecklist groups={groups} selected={groupIds} onToggle={toggleGroup} />
+          <GroupMultiSelect groups={groups} selected={groupIds} onToggle={toggleGroup} />
         )}
         <label className="row" style={{ cursor: "pointer" }}>
           <span className="tag" style={{ fontSize: 13, textTransform: "none", letterSpacing: 0 }}>Geht noch zur Schule (betrifft Ferienregelung)</span>
@@ -468,7 +479,7 @@ function EditStudentCard({ student, groups, onSave, onCancel }) {
     <div className="card col" style={{ marginBottom: 8, borderColor: "var(--ball)" }}>
       <input placeholder="Name des Schülers" value={name} onChange={(e) => setName(e.target.value)} />
       <div className="tag">Gruppen (mehrere möglich)</div>
-      <GroupChecklist groups={groups} selected={groupIds} onToggle={toggleGroup} />
+      <GroupMultiSelect groups={groups} selected={groupIds} onToggle={toggleGroup} />
       <label className="row" style={{ cursor: "pointer" }}>
         <span className="tag" style={{ fontSize: 13, textTransform: "none", letterSpacing: 0 }}>Geht noch zur Schule (betrifft Ferienregelung)</span>
         <input type="checkbox" style={{ width: "auto" }} checked={isSchoolchild} onChange={(e) => setIsSchoolchild(e.target.checked)} />
