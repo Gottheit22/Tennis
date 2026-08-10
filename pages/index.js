@@ -690,7 +690,35 @@ function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, fromYe
       {current && <InvoiceView invoice={current} biller={biller} onTogglePaid={onTogglePaid} />}
 
       <div className="net-divider" />
-      <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Verlauf ({invoices.length})</div>
+      <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Übersicht nach Gruppe</div>
+      {invoices.length === 0 && <div className="empty">Noch keine Rechnungen erstellt.</div>}
+      {groups.map((g) => {
+        const periods = invoices
+          .filter((i) => i.group_id === g.id)
+          .sort((a, b) => monthNum(a.year, a.month_idx) - monthNum(b.year, b.month_idx));
+        if (periods.length === 0) return null;
+        return (
+          <div key={g.id} className="card" style={{ marginBottom: 8 }}>
+            <div style={{ fontWeight: 500, marginBottom: 8 }}>{g.name}</div>
+            <div className="col" style={{ gap: 6 }}>
+              {periods.map((inv) => {
+                const openCount = (inv.students || []).filter((s) => !s.paid).length;
+                return (
+                  <button key={inv.id} className="row" style={{ background: "var(--surface2)", border: "1px solid var(--line)", borderRadius: 8, padding: "8px 10px", cursor: "pointer", width: "100%" }} onClick={() => setCurrent(inv)}>
+                    <span style={{ fontSize: 14 }}>{periodLabel(inv)}</span>
+                    <span className="tag" style={{ color: openCount > 0 ? "var(--clay)" : "var(--ball-dim)" }}>
+                      {fmtEUR(inv.total)} · {openCount > 0 ? `${openCount} offen` : "bezahlt"}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+
+      <div className="net-divider" />
+      <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Verlauf, chronologisch ({invoices.length})</div>
       {invoices.length === 0 && <div className="empty">Noch keine Rechnungen erstellt.</div>}
       {invoices.map((inv) => {
         const openCount = (inv.students || []).filter((s) => !s.paid).length;
