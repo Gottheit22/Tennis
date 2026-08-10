@@ -941,7 +941,13 @@ function OpenPaymentsTab({ invoices, onTogglePaid }) {
                   {s.items.map((it, idx) => (
                     <div key={idx} className="row">
                       <span style={{ fontSize: 14 }}>{it.groupName} — {it.period} · {it.trainings} Trainings</span>
-                      <span style={{ fontSize: 13, color: it.paid ? "var(--paid-green)" : "var(--clay)" }}>{fmtEUR(it.amount)} {it.paid ? "✓" : "offen"}</span>
+                      <div className="gap2" style={{ alignItems: "center" }}>
+                        <span style={{ fontSize: 13, whiteSpace: "nowrap" }}>{fmtEUR(it.amount)}</span>
+                        <button className="pill" style={{ fontSize: 11, padding: "4px 8px", borderColor: it.paid ? "var(--paid-green)" : "var(--line)", color: it.paid ? "var(--paid-green)" : "var(--chalk-dim)" }}
+                          onClick={() => onTogglePaid(it.invoiceId, it.lineIndex, !it.paid)}>
+                          {it.paid ? "✓ bezahlt" : "offen"}
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
