@@ -171,6 +171,13 @@ export default function Home() {
     const { data } = await supabase.from("students").update({ injuries }).eq("id", id).select().maybeSingle();
     setStudents((prev) => prev.map((s) => (s.id === id ? { ...s, ...(data || { injuries }) } : s)));
   };
+  const removeInjury = async (id, index) => {
+    const student = students.find((s) => s.id === id);
+    if (!student) return;
+    const injuries = (student.injuries || []).filter((_, idx) => idx !== index);
+    const { data } = await supabase.from("students").update({ injuries }).eq("id", id).select().maybeSingle();
+    setStudents((prev) => prev.map((s) => (s.id === id ? { ...s, ...(data || { injuries }) } : s)));
+  };
 
   // ---- Gruppen ----
   const addGroup = async (name, weekday, time, duration, oneOffDate) => {
@@ -406,7 +413,7 @@ export default function Home() {
         />
       )}
       {tab === "schueler" && (
-        <StudentsTab students={students} groups={groups} onAdd={addStudent} onDelete={delStudent} onUpdate={updateStudent} onStartInjury={startInjury} onEndInjury={endInjury} onAddGroup={addGroup} />
+        <StudentsTab students={students} groups={groups} onAdd={addStudent} onDelete={delStudent} onUpdate={updateStudent} onStartInjury={startInjury} onEndInjury={endInjury} onRemoveInjury={removeInjury} onAddGroup={addGroup} />
       )}
       {tab === "gruppen" && (
         <GroupsTab groups={groups} students={students} onAdd={addGroup} onDelete={delGroup} />
@@ -585,6 +592,7 @@ function StudentsTab({ students, groups, onAdd, onDelete, onUpdate, onStartInjur
           );
         }
         const openInjury = currentInjuryPeriod(s);
+        const openInjuryIdx = (s.injuries || []).length - 1;
         const editingInjury = injuryEditId === s.id;
         return (
           <div key={s.id} className="card" style={{ marginBottom: 8, opacity: openInjury ? 0.75 : 1 }}>
@@ -592,7 +600,13 @@ function StudentsTab({ students, groups, onAdd, onDelete, onUpdate, onStartInjur
               <div>
                 <div className="row" style={{ gap: 6, justifyContent: "flex-start" }}>
                   <div style={{ fontWeight: 500 }}>{s.name}</div>
-                  {openInjury && <span className="tag" style={{ color: "var(--clay)", border: "1px solid var(--clay)", borderRadius: 999, padding: "1px 7px" }}>verletzt seit {dateLabel(openInjury.from)}</span>}
+                  {openInjury && (
+                    <span className="tag" style={{ color: "var(--clay)", border: "1px solid var(--clay)", borderRadius: 999, padding: "1px 4px 1px 7px", display: "inline-flex", alignItems: "center", gap: 4 }}>
+                      verletzt seit {dateLabel(openInjury.from)}
+                      <button type="button" title="Versehentliche Meldung zurücknehmen" style={{ background: "none", border: "none", color: "var(--clay)", cursor: "pointer", padding: 0, fontSize: 12 }}
+                        onClick={() => onRemoveInjury(s.id, openInjuryIdx)}>✕</button>
+                    </span>
+                  )}
                 </div>
                 <div className="tag">
                   {(s.group_ids || []).length > 0 ? s.group_ids.map((gid) => groups.find((g) => g.id === gid)?.name).filter(Boolean).join(", ") : "— keine Gruppe —"}
@@ -618,6 +632,12 @@ function StudentsTab({ students, groups, onAdd, onDelete, onUpdate, onStartInjur
                   }}>
                   {openInjury ? "Ende bestätigen" : "Beginn bestätigen"}
                 </button>
+                {openInjury && (
+                  <button className="btn-primary" style={{ width: "auto", padding: "8px 14px", background: "var(--surface2)", color: "var(--clay)", border: "1px solid var(--clay)" }}
+                    onClick={() => { onRemoveInjury(s.id, openInjuryIdx); setInjuryEditId(null); }}>
+                    War ein Versehen — löschen
+                  </button>
+                )}
               </div>
             )}
           </div>
