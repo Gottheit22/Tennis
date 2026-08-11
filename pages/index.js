@@ -12,6 +12,10 @@ const isoDate = (d) => {
   return `${y}-${m}-${day}`;
 };
 function groupLabel(g) {
+  if (g.one_off_date) {
+    const [y, m, day] = g.one_off_date.split("-");
+    return `${g.name} — ${day}.${m}.${y}, ${g.time}`;
+  }
   return `${g.name} — ${WEEKDAYS[g.weekday]} ${g.time}`;
 }
 
@@ -53,6 +57,18 @@ function datesForMonth(year, monthIdx, weekday) {
     d.setDate(d.getDate() + 1);
   }
   return dates;
+}
+
+// Trainingstermine einer Gruppe in einem bestimmten Monat: bei wöchentlichen Gruppen
+// alle passenden Wochentage, bei einmaligen Trainings (Schnuppertraining) nur der eine
+// festgelegte Termin, sofern er in den abgefragten Monat fällt.
+function sessionDates(group, year, monthIdx) {
+  if (group.one_off_date) {
+    const [y, m, day] = group.one_off_date.split("-").map(Number);
+    if (y === year && m - 1 === monthIdx) return [new Date(year, monthIdx, day)];
+    return [];
+  }
+  return datesForMonth(year, monthIdx, group.weekday);
 }
 
 export default function Home() {
@@ -108,9 +124,9 @@ export default function Home() {
   }, [groups]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- Schüler ----
-  const addStudent = async (name, groupIds, isSchoolchild) => {
+  const addStudent = async (name, groupIds, isSchoolchild, injured) => {
     if (!name.trim()) return;
-    const { data } = await supabase.from("students").insert({ name: name.trim(), is_schoolchild: isSchoolchild }).select();
+    const { data } = await supabase.from("students").insert({ name: name.trim(), is_schoolchild: isSchoolchild, injured: !!injured }).select();
     const student = data && data[0];
     if (!student) return;
     if (groupIds.length > 0) {
@@ -122,19 +138,23 @@ export default function Home() {
     await supabase.from("students").delete().eq("id", id);
     setStudents((prev) => prev.filter((s) => s.id !== id));
   };
-  const updateStudent = async (id, { name, is_schoolchild, groupIds }) => {
-    const { data } = await supabase.from("students").update({ name, is_schoolchild }).eq("id", id).select().maybeSingle();
+  const updateStudent = async (id, { name, is_schoolchild, groupIds, injured }) => {
+    const { data } = await supabase.from("students").update({ name, is_schoolchild, injured: !!injured }).eq("id", id).select().maybeSingle();
     await supabase.from("student_groups").delete().eq("student_id", id);
     if (groupIds.length > 0) {
       await supabase.from("student_groups").insert(groupIds.map((gid) => ({ student_id: id, group_id: gid })));
     }
-    setStudents((prev) => prev.map((s) => (s.id === id ? { ...s, ...(data || { name, is_schoolchild }), group_ids: groupIds } : s)).sort((x, y) => x.name.localeCompare(y.name)));
+    setStudents((prev) => prev.map((s) => (s.id === id ? { ...s, ...(data || { name, is_schoolchild, injured: !!injured }), group_ids: groupIds } : s)).sort((x, y) => x.name.localeCompare(y.name)));
+  };
+  const setInjured = async (id, injured) => {
+    const { data } = await supabase.from("students").update({ injured }).eq("id", id).select().maybeSingle();
+    setStudents((prev) => prev.map((s) => (s.id === id ? { ...s, ...(data || { injured }) } : s)));
   };
 
   // ---- Gruppen ----
-  const addGroup = async (name, weekday, time, duration) => {
+  const addGroup = async (name, weekday, time, duration, oneOffDate) => {
     if (!name.trim()) return;
-    const { data } = await supabase.from("groups").insert({ name: name.trim(), weekday, time, duration }).select();
+    const { data } = await supabase.from("groups").insert({ name: name.trim(), weekday: oneOffDate ? null : weekday, time, duration, one_off_date: oneOffDate || null }).select();
     if (data) setGroups((prev) => [...prev, ...data].sort((x, y) => x.name.localeCompare(y.name)));
   };
   const delGroup = async (id) => {
@@ -180,8 +200,9 @@ export default function Home() {
     const group = groups.find((g) => g.id === groupId);
     if (!group) return;
     const groupStudents = students.filter((s) => (s.group_ids || []).includes(groupId));
-    const studentCount = groupStudents.length;
-    const schoolchildCount = groupStudents.filter((s) => s.is_schoolchild).length;
+    const billableStudents = groupStudents.filter((s) => !s.injured);
+    const studentCount = billableStudents.length;
+    const schoolchildCount = billableStudents.filter((s) => s.is_schoolchild).length;
 
     // Alle Monate im gewählten Zeitraum (inklusive) durchlaufen.
     const monthList = [];
@@ -198,7 +219,7 @@ export default function Home() {
     };
 
     const charges = {};
-    groupStudents.forEach((s) => { charges[s.id] = []; });
+    billableStudents.forEach((s) => { charges[s.id] = []; });
     const dateEntries = [];
     let heldCount = 0;
 
@@ -206,7 +227,7 @@ export default function Home() {
     // nicht nach dem ursprünglich generierten Wochentags-Datum.
     const sessions = [];
     monthList.forEach(({ year, monthIdx }) => {
-      datesForMonth(year, monthIdx, group.weekday).forEach((d) => {
+      sessionDates(group, year, monthIdx).forEach((d) => {
         const originalDateIso = isoDate(d);
         const entry = attendance[`${groupId}__${originalDateIso}`] || { cancelled: false, present: {}, moved_to: null, duration: null };
         if (entry.cancelled) return;
@@ -234,8 +255,8 @@ export default function Home() {
       const holiday = isBavarianHoliday(effectiveIso);
       let note = "";
       if (holiday) {
-        groupStudents.filter((s) => !s.is_schoolchild).forEach((s) => charges[s.id].push(flatShare));
-        const attendingSchoolchildren = groupStudents.filter((s) => s.is_schoolchild && entry.present[s.id]);
+        billableStudents.filter((s) => !s.is_schoolchild).forEach((s) => charges[s.id].push(flatShare));
+        const attendingSchoolchildren = billableStudents.filter((s) => s.is_schoolchild && entry.present[s.id]);
         if (attendingSchoolchildren.length > 0) {
           const share = slotCost / attendingSchoolchildren.length;
           attendingSchoolchildren.forEach((s) => charges[s.id].push(share));
@@ -244,7 +265,7 @@ export default function Home() {
           note = attendingSchoolchildren.length > 0 ? attendingSchoolchildren.map((s) => s.name).join(", ") : "niemand von den Schulkindern";
         }
       } else {
-        groupStudents.forEach((s) => charges[s.id].push(flatShare));
+        billableStudents.forEach((s) => charges[s.id].push(flatShare));
       }
       if (entry.duration && entry.duration !== group.duration) {
         note = note ? `${note}; ${entry.duration} Min` : `${entry.duration} Min`;
@@ -254,7 +275,7 @@ export default function Home() {
     });
     dateEntries.sort((a, b) => a.dateIso.localeCompare(b.dateIso));
 
-    const studentsOut = groupStudents.map((s) => {
+    const studentsOut = billableStudents.map((s) => {
       const amounts = charges[s.id];
       const total = amounts.reduce((sum, a) => sum + a, 0);
       const order = [];
@@ -271,6 +292,9 @@ export default function Home() {
       }).join(" + ");
       return { id: s.id, name: s.name, total, formula: formula || fmtEUR(0), count: amounts.length };
     });
+    // Verletzte Schüler werden transparent mit aufgeführt, aber nicht berechnet.
+    const injuredOut = groupStudents.filter((s) => s.injured).map((s) => ({ id: s.id, name: s.name, total: 0, formula: "verletzt – nicht berechnet", count: 0, injured: true }));
+    studentsOut.push(...injuredOut);
     const total = studentsOut.reduce((sum, s) => sum + s.total, 0);
 
     // Alle bestehenden Rechnungen dieser Gruppe, die sich mit dem gewählten Zeitraum
@@ -339,7 +363,7 @@ export default function Home() {
         />
       )}
       {tab === "schueler" && (
-        <StudentsTab students={students} groups={groups} onAdd={addStudent} onDelete={delStudent} onUpdate={updateStudent} />
+        <StudentsTab students={students} groups={groups} onAdd={addStudent} onDelete={delStudent} onUpdate={updateStudent} onSetInjured={setInjured} />
       )}
       {tab === "gruppen" && (
         <GroupsTab groups={groups} students={students} onAdd={addGroup} onDelete={delGroup} />
@@ -416,10 +440,11 @@ function GroupMultiSelect({ groups, selected, onToggle }) {
   );
 }
 
-function StudentsTab({ students, groups, onAdd, onDelete, onUpdate }) {
+function StudentsTab({ students, groups, onAdd, onDelete, onUpdate, onSetInjured }) {
   const [name, setName] = useState("");
   const [groupIds, setGroupIds] = useState([]);
   const [isSchoolchild, setIsSchoolchild] = useState(true);
+  const [injured, setInjured] = useState(false);
   const [editingId, setEditingId] = useState(null);
 
   const toggleGroup = (gid) => {
@@ -439,7 +464,11 @@ function StudentsTab({ students, groups, onAdd, onDelete, onUpdate }) {
           <span className="tag" style={{ fontSize: 13, textTransform: "none", letterSpacing: 0 }}>Geht noch zur Schule (betrifft Ferienregelung)</span>
           <input type="checkbox" style={{ width: "auto" }} checked={isSchoolchild} onChange={(e) => setIsSchoolchild(e.target.checked)} />
         </label>
-        <button className="btn-primary" onClick={() => { onAdd(name, groupIds, isSchoolchild); setName(""); setGroupIds([]); }}>+ Schüler hinzufügen</button>
+        <label className="row" style={{ cursor: "pointer" }}>
+          <span className="tag" style={{ fontSize: 13, textTransform: "none", letterSpacing: 0 }}>Verletzt (wird bei der Abrechnung nicht berechnet)</span>
+          <input type="checkbox" style={{ width: "auto" }} checked={injured} onChange={(e) => setInjured(e.target.checked)} />
+        </label>
+        <button className="btn-primary" onClick={() => { onAdd(name, groupIds, isSchoolchild, injured); setName(""); setGroupIds([]); setInjured(false); }}>+ Schüler hinzufügen</button>
       </div>
       <div className="net-divider" />
       <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Alle Schüler ({students.length})</div>
@@ -449,15 +478,22 @@ function StudentsTab({ students, groups, onAdd, onDelete, onUpdate }) {
           <EditStudentCard key={s.id} student={s} groups={groups} onCancel={() => setEditingId(null)}
             onSave={(patch) => { onUpdate(s.id, patch); setEditingId(null); }} />
         ) : (
-          <div key={s.id} className="card row" style={{ marginBottom: 8 }}>
+          <div key={s.id} className="card row" style={{ marginBottom: 8, opacity: s.injured ? 0.7 : 1 }}>
             <div>
-              <div style={{ fontWeight: 500 }}>{s.name}</div>
+              <div className="row" style={{ gap: 6, justifyContent: "flex-start" }}>
+                <div style={{ fontWeight: 500 }}>{s.name}</div>
+                {s.injured && <span className="tag" style={{ color: "var(--clay)", border: "1px solid var(--clay)", borderRadius: 999, padding: "1px 7px" }}>verletzt</span>}
+              </div>
               <div className="tag">
                 {(s.group_ids || []).length > 0 ? s.group_ids.map((gid) => groups.find((g) => g.id === gid)?.name).filter(Boolean).join(", ") : "— keine Gruppe —"}
                 {" · "}{s.is_schoolchild ? "Schüler" : "Kein Schüler"}
               </div>
             </div>
             <div className="gap2">
+              <button className="icon-btn" style={{ color: s.injured ? "var(--paid-green)" : "var(--clay)", fontSize: 11, whiteSpace: "nowrap" }}
+                onClick={() => onSetInjured(s.id, !s.injured)}>
+                {s.injured ? "✓ gesund melden" : "verletzt"}
+              </button>
               <button className="icon-btn" style={{ color: "var(--chalk-dim)" }} onClick={() => setEditingId(s.id)}>✎</button>
               <button className="icon-btn" onClick={() => onDelete(s.id)}>✕</button>
             </div>
@@ -472,6 +508,7 @@ function EditStudentCard({ student, groups, onSave, onCancel }) {
   const [name, setName] = useState(student.name);
   const [groupIds, setGroupIds] = useState(student.group_ids || []);
   const [isSchoolchild, setIsSchoolchild] = useState(!!student.is_schoolchild);
+  const [injured, setInjured] = useState(!!student.injured);
   const toggleGroup = (gid) => {
     setGroupIds((prev) => (prev.includes(gid) ? prev.filter((id) => id !== gid) : [...prev, gid]));
   };
@@ -484,8 +521,12 @@ function EditStudentCard({ student, groups, onSave, onCancel }) {
         <span className="tag" style={{ fontSize: 13, textTransform: "none", letterSpacing: 0 }}>Geht noch zur Schule (betrifft Ferienregelung)</span>
         <input type="checkbox" style={{ width: "auto" }} checked={isSchoolchild} onChange={(e) => setIsSchoolchild(e.target.checked)} />
       </label>
+      <label className="row" style={{ cursor: "pointer" }}>
+        <span className="tag" style={{ fontSize: 13, textTransform: "none", letterSpacing: 0 }}>Verletzt (wird bei der Abrechnung nicht berechnet)</span>
+        <input type="checkbox" style={{ width: "auto" }} checked={injured} onChange={(e) => setInjured(e.target.checked)} />
+      </label>
       <div className="gap2">
-        <button className="btn-primary" style={{ flex: 1 }} onClick={() => onSave({ name: name.trim(), groupIds, is_schoolchild: isSchoolchild })}>Speichern</button>
+        <button className="btn-primary" style={{ flex: 1 }} onClick={() => onSave({ name: name.trim(), groupIds, is_schoolchild: isSchoolchild, injured })}>Speichern</button>
         <button className="btn-primary" style={{ flex: 1, background: "var(--surface2)", color: "var(--chalk)" }} onClick={onCancel}>Abbrechen</button>
       </div>
     </div>
@@ -497,23 +538,36 @@ function GroupsTab({ groups, students, onAdd, onDelete }) {
   const [weekday, setWeekday] = useState(0);
   const [time, setTime] = useState("16:00");
   const [duration, setDuration] = useState(60);
+  const [oneOff, setOneOff] = useState(false);
+  const [oneOffDate, setOneOffDate] = useState("");
   const [expandedId, setExpandedId] = useState(null);
   return (
     <div>
       <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Gruppe anlegen</div>
       <div className="card col">
-        <input placeholder="Gruppenname (z. B. Kids Mittwoch)" value={name} onChange={(e) => setName(e.target.value)} />
+        <input placeholder={oneOff ? "Bezeichnung (z. B. Schnuppertraining Familie Meyer)" : "Gruppenname (z. B. Kids Mittwoch)"} value={name} onChange={(e) => setName(e.target.value)} />
+        <label className="row" style={{ cursor: "pointer" }}>
+          <span className="tag" style={{ fontSize: 13, textTransform: "none", letterSpacing: 0 }}>Einmaliges Training (z. B. Schnuppertraining)</span>
+          <input type="checkbox" style={{ width: "auto" }} checked={oneOff} onChange={(e) => setOneOff(e.target.checked)} />
+        </label>
         <div className="gap2">
-          <select value={weekday} onChange={(e) => setWeekday(Number(e.target.value))} style={{ flex: 2 }}>
-            {WEEKDAYS.map((w, i) => <option key={w} value={i}>{w}</option>)}
-          </select>
+          {oneOff ? (
+            <input type="date" value={oneOffDate} onChange={(e) => setOneOffDate(e.target.value)} style={{ flex: 2 }} />
+          ) : (
+            <select value={weekday} onChange={(e) => setWeekday(Number(e.target.value))} style={{ flex: 2 }}>
+              {WEEKDAYS.map((w, i) => <option key={w} value={i}>{w}</option>)}
+            </select>
+          )}
           <input type="time" value={time} onChange={(e) => setTime(e.target.value)} style={{ flex: 1 }} />
         </div>
         <div className="gap2" style={{ alignItems: "center" }}>
           <input type="number" min="15" step="15" value={duration} onChange={(e) => setDuration(Number(e.target.value))} />
           <span className="tag" style={{ whiteSpace: "nowrap" }}>Minuten Dauer</span>
         </div>
-        <button className="btn-primary" onClick={() => { onAdd(name, weekday, time, duration); setName(""); }}>+ Gruppe anlegen</button>
+        <button className="btn-primary" disabled={oneOff && !oneOffDate}
+          onClick={() => { onAdd(name, weekday, time, duration, oneOff ? oneOffDate : null); setName(""); setOneOffDate(""); setOneOff(false); }}>
+          + {oneOff ? "Einmaliges Training" : "Gruppe"} anlegen
+        </button>
       </div>
       <div className="net-divider" />
       <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Alle Gruppen ({groups.length})</div>
@@ -526,7 +580,7 @@ function GroupsTab({ groups, students, onAdd, onDelete }) {
             <button className="row" style={{ width: "100%", background: "none", border: "none", cursor: "pointer", textAlign: "left" }} onClick={() => setExpandedId(expanded ? null : g.id)}>
               <div>
                 <div style={{ fontWeight: 500 }}>{g.name}</div>
-                <div className="tag">{WEEKDAYS[g.weekday]} · {g.time} Uhr · {g.duration} Min · {members.length} Schüler</div>
+                <div className="tag">{g.one_off_date ? `Einmalig, ${dateLabel(g.one_off_date)}` : WEEKDAYS[g.weekday]} · {g.time} Uhr · {g.duration} Min · {members.length} Schüler</div>
               </div>
               <span className="tag">{expanded ? "▲" : "▼"}</span>
             </button>
@@ -557,7 +611,7 @@ function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, 
   if (groups.length === 0) return <div className="empty">Lege zuerst eine Gruppe an (Tab „Gruppen").</div>;
   const group = groups.find((g) => g.id === groupId) || groups[0];
   const groupStudents = students.filter((s) => (s.group_ids || []).includes(group.id));
-  const dates = datesForMonth(year, monthIdx, group.weekday);
+  const dates = sessionDates(group, year, monthIdx);
 
   const shiftMonth = (delta) => {
     let m = monthIdx + delta, y = year;
@@ -576,8 +630,10 @@ function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, 
         <div className="disp">{MONTHS[monthIdx]} {year}</div>
         <button className="card" style={{ padding: "8px 12px", cursor: "pointer" }} onClick={() => shiftMonth(1)}>›</button>
       </div>
-      <div className="tag" style={{ marginBottom: 12 }}>{WEEKDAYS[group.weekday]}, {group.time} Uhr · {group.duration} Min (Standard) · {groupStudents.length} Schüler</div>
-      {dates.length === 0 && <div className="empty">Kein passender Wochentag in diesem Monat.</div>}
+      <div className="tag" style={{ marginBottom: 12 }}>
+        {group.one_off_date ? `Einmaliges Training, ${dateLabel(group.one_off_date)}` : `${WEEKDAYS[group.weekday]}, ${group.time} Uhr`} · {group.duration} Min (Standard) · {groupStudents.length} Schüler
+      </div>
+      {dates.length === 0 && <div className="empty">{group.one_off_date ? "Der Termin liegt nicht in diesem Monat — zum passenden Monat navigieren." : "Kein passender Wochentag in diesem Monat."}</div>}
       {dates.map((d) => {
         const dateIso = isoDate(d);
         const entry = attendance[`${group.id}__${dateIso}`] || { cancelled: false, present: {}, moved_to: null, duration: null };
