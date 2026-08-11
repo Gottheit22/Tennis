@@ -19,6 +19,17 @@ function groupLabel(g) {
   return `${g.name} — ${WEEKDAYS[g.weekday]} ${g.time}`;
 }
 
+// Prüft, ob ein Schüler an einem bestimmten Datum innerhalb eines erfassten
+// Verletzungszeitraums war (until = null bedeutet: bis heute andauernd).
+function isInjuredOn(student, dateIso) {
+  return (student.injuries || []).some((p) => dateIso >= p.from && (!p.until || dateIso <= p.until));
+}
+function currentInjuryPeriod(student) {
+  const injuries = student.injuries || [];
+  const last = injuries[injuries.length - 1];
+  return last && !last.until ? last : null;
+}
+
 // Erzeugt clientseitig eine garantiert eindeutige ID, damit eine Rechnung nie ohne
 // (oder mit doppelter) ID im lokalen Zustand landet, selbst wenn der Speichervorgang
 // beim Zurücklesen aus der Datenbank einmal ins Leere läuft.
@@ -124,31 +135,41 @@ export default function Home() {
   }, [groups]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- Schüler ----
-  const addStudent = async (name, groupIds, isSchoolchild, injured) => {
+  const addStudent = async (name, groupIds, isSchoolchild) => {
     if (!name.trim()) return;
-    const { data } = await supabase.from("students").insert({ name: name.trim(), is_schoolchild: isSchoolchild, injured: !!injured }).select();
+    const { data } = await supabase.from("students").insert({ name: name.trim(), is_schoolchild: isSchoolchild }).select();
     const student = data && data[0];
     if (!student) return;
     if (groupIds.length > 0) {
       await supabase.from("student_groups").insert(groupIds.map((gid) => ({ student_id: student.id, group_id: gid })));
     }
-    setStudents((prev) => [...prev, { ...student, group_ids: groupIds }].sort((x, y) => x.name.localeCompare(y.name)));
+    setStudents((prev) => [...prev, { ...student, group_ids: groupIds, injuries: [] }].sort((x, y) => x.name.localeCompare(y.name)));
   };
   const delStudent = async (id) => {
     await supabase.from("students").delete().eq("id", id);
     setStudents((prev) => prev.filter((s) => s.id !== id));
   };
-  const updateStudent = async (id, { name, is_schoolchild, groupIds, injured }) => {
-    const { data } = await supabase.from("students").update({ name, is_schoolchild, injured: !!injured }).eq("id", id).select().maybeSingle();
+  const updateStudent = async (id, { name, is_schoolchild, groupIds }) => {
+    const { data } = await supabase.from("students").update({ name, is_schoolchild }).eq("id", id).select().maybeSingle();
     await supabase.from("student_groups").delete().eq("student_id", id);
     if (groupIds.length > 0) {
       await supabase.from("student_groups").insert(groupIds.map((gid) => ({ student_id: id, group_id: gid })));
     }
-    setStudents((prev) => prev.map((s) => (s.id === id ? { ...s, ...(data || { name, is_schoolchild, injured: !!injured }), group_ids: groupIds } : s)).sort((x, y) => x.name.localeCompare(y.name)));
+    setStudents((prev) => prev.map((s) => (s.id === id ? { ...s, ...(data || { name, is_schoolchild }), group_ids: groupIds } : s)).sort((x, y) => x.name.localeCompare(y.name)));
   };
-  const setInjured = async (id, injured) => {
-    const { data } = await supabase.from("students").update({ injured }).eq("id", id).select().maybeSingle();
-    setStudents((prev) => prev.map((s) => (s.id === id ? { ...s, ...(data || { injured }) } : s)));
+  const startInjury = async (id, fromDate) => {
+    const student = students.find((s) => s.id === id);
+    if (!student) return;
+    const injuries = [...(student.injuries || []), { from: fromDate, until: null }];
+    const { data } = await supabase.from("students").update({ injuries }).eq("id", id).select().maybeSingle();
+    setStudents((prev) => prev.map((s) => (s.id === id ? { ...s, ...(data || { injuries }) } : s)));
+  };
+  const endInjury = async (id, untilDate) => {
+    const student = students.find((s) => s.id === id);
+    if (!student) return;
+    const injuries = (student.injuries || []).map((p, idx, arr) => (idx === arr.length - 1 && !p.until ? { ...p, until: untilDate } : p));
+    const { data } = await supabase.from("students").update({ injuries }).eq("id", id).select().maybeSingle();
+    setStudents((prev) => prev.map((s) => (s.id === id ? { ...s, ...(data || { injuries }) } : s)));
   };
 
   // ---- Gruppen ----
@@ -200,9 +221,7 @@ export default function Home() {
     const group = groups.find((g) => g.id === groupId);
     if (!group) return;
     const groupStudents = students.filter((s) => (s.group_ids || []).includes(groupId));
-    const billableStudents = groupStudents.filter((s) => !s.injured);
-    const studentCount = billableStudents.length;
-    const schoolchildCount = billableStudents.filter((s) => s.is_schoolchild).length;
+    const originalGroupSize = groupStudents.length;
 
     // Alle Monate im gewählten Zeitraum (inklusive) durchlaufen.
     const monthList = [];
@@ -219,9 +238,10 @@ export default function Home() {
     };
 
     const charges = {};
-    billableStudents.forEach((s) => { charges[s.id] = []; });
+    groupStudents.forEach((s) => { charges[s.id] = []; });
     const dateEntries = [];
     let heldCount = 0;
+    const injuredNamesAffected = new Set();
 
     // Sitzungen sammeln: nach dem tatsächlichen (ggf. verschobenen) Datum zählen,
     // nicht nach dem ursprünglich generierten Wochentags-Datum.
@@ -248,24 +268,30 @@ export default function Home() {
     });
 
     sessions.forEach(({ originalDateIso, entry, effectiveIso }) => {
+      // Pro Termin prüfen, wer an genau diesem Tag verletzt war — nicht pauschal für die ganze Rechnung.
+      const sessionStudents = groupStudents.filter((s) => !isInjuredOn(s, effectiveIso));
+      groupStudents.filter((s) => isInjuredOn(s, effectiveIso)).forEach((s) => injuredNamesAffected.add(s.name));
+      const sessionCount = sessionStudents.length;
+      const sessionSchoolchildCount = sessionStudents.filter((s) => s.is_schoolchild).length;
+
       const effectiveDuration = entry.duration || group.duration;
       const slotCost = HOURLY_RATE * (effectiveDuration / 60);
-      const flatShare = studentCount > 0 ? slotCost / studentCount : 0;
+      const flatShare = sessionCount > 0 ? slotCost / sessionCount : 0;
       heldCount++;
       const holiday = isBavarianHoliday(effectiveIso);
       let note = "";
       if (holiday) {
-        billableStudents.filter((s) => !s.is_schoolchild).forEach((s) => charges[s.id].push(flatShare));
-        const attendingSchoolchildren = billableStudents.filter((s) => s.is_schoolchild && entry.present[s.id]);
+        sessionStudents.filter((s) => !s.is_schoolchild).forEach((s) => charges[s.id].push(flatShare));
+        const attendingSchoolchildren = sessionStudents.filter((s) => s.is_schoolchild && entry.present[s.id]);
         if (attendingSchoolchildren.length > 0) {
           const share = slotCost / attendingSchoolchildren.length;
           attendingSchoolchildren.forEach((s) => charges[s.id].push(share));
         }
-        if (schoolchildCount > 0) {
+        if (sessionSchoolchildCount > 0) {
           note = attendingSchoolchildren.length > 0 ? attendingSchoolchildren.map((s) => s.name).join(", ") : "niemand von den Schulkindern";
         }
       } else {
-        billableStudents.forEach((s) => charges[s.id].push(flatShare));
+        sessionStudents.forEach((s) => charges[s.id].push(flatShare));
       }
       if (entry.duration && entry.duration !== group.duration) {
         note = note ? `${note}; ${entry.duration} Min` : `${entry.duration} Min`;
@@ -275,7 +301,7 @@ export default function Home() {
     });
     dateEntries.sort((a, b) => a.dateIso.localeCompare(b.dateIso));
 
-    const studentsOut = billableStudents.map((s) => {
+    const studentsOut = groupStudents.map((s) => {
       const amounts = charges[s.id];
       const total = amounts.reduce((sum, a) => sum + a, 0);
       const order = [];
@@ -292,10 +318,12 @@ export default function Home() {
       }).join(" + ");
       return { id: s.id, name: s.name, total, formula: formula || fmtEUR(0), count: amounts.length };
     });
-    // Verletzte Schüler werden transparent mit aufgeführt, aber nicht berechnet.
-    const injuredOut = groupStudents.filter((s) => s.injured).map((s) => ({ id: s.id, name: s.name, total: 0, formula: "verletzt – nicht berechnet", count: 0, injured: true }));
-    studentsOut.push(...injuredOut);
     const total = studentsOut.reduce((sum, s) => sum + s.total, 0);
+    // Hinweiszeilen, falls während des Zeitraums jemand verletzt war und sich dadurch
+    // die Kostenteilung für die betroffenen Termine geändert hat.
+    const injuryNotes = [...injuredNamesAffected].map((name) =>
+      `Da sich ${name} verletzt hat, werden die Kosten für die Dauer der Verletzung nur durch ${originalGroupSize - 1} geteilt.`
+    );
 
     // Alle bestehenden Rechnungen dieser Gruppe, die sich mit dem gewählten Zeitraum
     // überschneiden (auch teilweise) — die werden durch die frisch berechnete Rechnung
@@ -315,7 +343,8 @@ export default function Home() {
       to_year: toYear,
       to_month_idx: toMonthIdx,
       held_count: heldCount,
-      student_count: studentCount,
+      student_count: originalGroupSize,
+      injury_notes: injuryNotes,
       total,
       students: studentsOutWithPaid,
       dates: dateEntries,
@@ -363,7 +392,7 @@ export default function Home() {
         />
       )}
       {tab === "schueler" && (
-        <StudentsTab students={students} groups={groups} onAdd={addStudent} onDelete={delStudent} onUpdate={updateStudent} onSetInjured={setInjured} />
+        <StudentsTab students={students} groups={groups} onAdd={addStudent} onDelete={delStudent} onUpdate={updateStudent} onStartInjury={startInjury} onEndInjury={endInjury} />
       )}
       {tab === "gruppen" && (
         <GroupsTab groups={groups} students={students} onAdd={addGroup} onDelete={delGroup} />
@@ -440,16 +469,18 @@ function GroupMultiSelect({ groups, selected, onToggle }) {
   );
 }
 
-function StudentsTab({ students, groups, onAdd, onDelete, onUpdate, onSetInjured }) {
+function StudentsTab({ students, groups, onAdd, onDelete, onUpdate, onStartInjury, onEndInjury }) {
   const [name, setName] = useState("");
   const [groupIds, setGroupIds] = useState([]);
   const [isSchoolchild, setIsSchoolchild] = useState(true);
-  const [injured, setInjured] = useState(false);
   const [editingId, setEditingId] = useState(null);
+  const [injuryEditId, setInjuryEditId] = useState(null);
+  const [injuryDate, setInjuryDate] = useState("");
 
   const toggleGroup = (gid) => {
     setGroupIds((prev) => (prev.includes(gid) ? prev.filter((id) => id !== gid) : [...prev, gid]));
   };
+  const today = isoDate(new Date());
 
   return (
     <div>
@@ -464,42 +495,57 @@ function StudentsTab({ students, groups, onAdd, onDelete, onUpdate, onSetInjured
           <span className="tag" style={{ fontSize: 13, textTransform: "none", letterSpacing: 0 }}>Geht noch zur Schule (betrifft Ferienregelung)</span>
           <input type="checkbox" style={{ width: "auto" }} checked={isSchoolchild} onChange={(e) => setIsSchoolchild(e.target.checked)} />
         </label>
-        <label className="row" style={{ cursor: "pointer" }}>
-          <span className="tag" style={{ fontSize: 13, textTransform: "none", letterSpacing: 0 }}>Verletzt (wird bei der Abrechnung nicht berechnet)</span>
-          <input type="checkbox" style={{ width: "auto" }} checked={injured} onChange={(e) => setInjured(e.target.checked)} />
-        </label>
-        <button className="btn-primary" onClick={() => { onAdd(name, groupIds, isSchoolchild, injured); setName(""); setGroupIds([]); setInjured(false); }}>+ Schüler hinzufügen</button>
+        <button className="btn-primary" onClick={() => { onAdd(name, groupIds, isSchoolchild); setName(""); setGroupIds([]); }}>+ Schüler hinzufügen</button>
       </div>
       <div className="net-divider" />
       <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Alle Schüler ({students.length})</div>
       {students.length === 0 && <div className="empty">Noch keine Schüler angelegt.</div>}
-      {students.map((s) =>
-        editingId === s.id ? (
-          <EditStudentCard key={s.id} student={s} groups={groups} onCancel={() => setEditingId(null)}
-            onSave={(patch) => { onUpdate(s.id, patch); setEditingId(null); }} />
-        ) : (
-          <div key={s.id} className="card row" style={{ marginBottom: 8, opacity: s.injured ? 0.7 : 1 }}>
-            <div>
-              <div className="row" style={{ gap: 6, justifyContent: "flex-start" }}>
-                <div style={{ fontWeight: 500 }}>{s.name}</div>
-                {s.injured && <span className="tag" style={{ color: "var(--clay)", border: "1px solid var(--clay)", borderRadius: 999, padding: "1px 7px" }}>verletzt</span>}
+      {students.map((s) => {
+        if (editingId === s.id) {
+          return (
+            <EditStudentCard key={s.id} student={s} groups={groups} onCancel={() => setEditingId(null)}
+              onSave={(patch) => { onUpdate(s.id, patch); setEditingId(null); }} />
+          );
+        }
+        const openInjury = currentInjuryPeriod(s);
+        const editingInjury = injuryEditId === s.id;
+        return (
+          <div key={s.id} className="card" style={{ marginBottom: 8, opacity: openInjury ? 0.75 : 1 }}>
+            <div className="row">
+              <div>
+                <div className="row" style={{ gap: 6, justifyContent: "flex-start" }}>
+                  <div style={{ fontWeight: 500 }}>{s.name}</div>
+                  {openInjury && <span className="tag" style={{ color: "var(--clay)", border: "1px solid var(--clay)", borderRadius: 999, padding: "1px 7px" }}>verletzt seit {dateLabel(openInjury.from)}</span>}
+                </div>
+                <div className="tag">
+                  {(s.group_ids || []).length > 0 ? s.group_ids.map((gid) => groups.find((g) => g.id === gid)?.name).filter(Boolean).join(", ") : "— keine Gruppe —"}
+                  {" · "}{s.is_schoolchild ? "Schüler" : "Kein Schüler"}
+                </div>
               </div>
-              <div className="tag">
-                {(s.group_ids || []).length > 0 ? s.group_ids.map((gid) => groups.find((g) => g.id === gid)?.name).filter(Boolean).join(", ") : "— keine Gruppe —"}
-                {" · "}{s.is_schoolchild ? "Schüler" : "Kein Schüler"}
+              <div className="gap2">
+                <button className="icon-btn" style={{ color: openInjury ? "var(--paid-green)" : "var(--clay)", fontSize: 11, whiteSpace: "nowrap" }}
+                  onClick={() => { setInjuryEditId(editingInjury ? null : s.id); setInjuryDate(today); setEditingId(null); }}>
+                  {openInjury ? "genesen melden" : "verletzt melden"}
+                </button>
+                <button className="icon-btn" style={{ color: "var(--chalk-dim)" }} onClick={() => setEditingId(s.id)}>✎</button>
+                <button className="icon-btn" onClick={() => onDelete(s.id)}>✕</button>
               </div>
             </div>
-            <div className="gap2">
-              <button className="icon-btn" style={{ color: s.injured ? "var(--paid-green)" : "var(--clay)", fontSize: 11, whiteSpace: "nowrap" }}
-                onClick={() => onSetInjured(s.id, !s.injured)}>
-                {s.injured ? "✓ gesund melden" : "verletzt"}
-              </button>
-              <button className="icon-btn" style={{ color: "var(--chalk-dim)" }} onClick={() => setEditingId(s.id)}>✎</button>
-              <button className="icon-btn" onClick={() => onDelete(s.id)}>✕</button>
-            </div>
+            {editingInjury && (
+              <div className="gap2" style={{ marginTop: 10, alignItems: "center" }}>
+                <input type="date" value={injuryDate} onChange={(e) => setInjuryDate(e.target.value)} style={{ flex: 1 }} />
+                <button className="btn-primary" style={{ width: "auto", padding: "8px 14px" }}
+                  onClick={() => {
+                    if (openInjury) onEndInjury(s.id, injuryDate); else onStartInjury(s.id, injuryDate);
+                    setInjuryEditId(null);
+                  }}>
+                  {openInjury ? "Ende bestätigen" : "Beginn bestätigen"}
+                </button>
+              </div>
+            )}
           </div>
-        )
-      )}
+        );
+      })}
     </div>
   );
 }
@@ -508,7 +554,6 @@ function EditStudentCard({ student, groups, onSave, onCancel }) {
   const [name, setName] = useState(student.name);
   const [groupIds, setGroupIds] = useState(student.group_ids || []);
   const [isSchoolchild, setIsSchoolchild] = useState(!!student.is_schoolchild);
-  const [injured, setInjured] = useState(!!student.injured);
   const toggleGroup = (gid) => {
     setGroupIds((prev) => (prev.includes(gid) ? prev.filter((id) => id !== gid) : [...prev, gid]));
   };
@@ -521,12 +566,8 @@ function EditStudentCard({ student, groups, onSave, onCancel }) {
         <span className="tag" style={{ fontSize: 13, textTransform: "none", letterSpacing: 0 }}>Geht noch zur Schule (betrifft Ferienregelung)</span>
         <input type="checkbox" style={{ width: "auto" }} checked={isSchoolchild} onChange={(e) => setIsSchoolchild(e.target.checked)} />
       </label>
-      <label className="row" style={{ cursor: "pointer" }}>
-        <span className="tag" style={{ fontSize: 13, textTransform: "none", letterSpacing: 0 }}>Verletzt (wird bei der Abrechnung nicht berechnet)</span>
-        <input type="checkbox" style={{ width: "auto" }} checked={injured} onChange={(e) => setInjured(e.target.checked)} />
-      </label>
       <div className="gap2">
-        <button className="btn-primary" style={{ flex: 1 }} onClick={() => onSave({ name: name.trim(), groupIds, is_schoolchild: isSchoolchild, injured })}>Speichern</button>
+        <button className="btn-primary" style={{ flex: 1 }} onClick={() => onSave({ name: name.trim(), groupIds, is_schoolchild: isSchoolchild })}>Speichern</button>
         <button className="btn-primary" style={{ flex: 1, background: "var(--surface2)", color: "var(--chalk)" }} onClick={onCancel}>Abbrechen</button>
       </div>
     </div>
@@ -885,6 +926,13 @@ function InvoiceView({ invoice, biller, onTogglePaid }) {
           <div key={d.dateIso}>• {dateLabel(d.dateIso)}{dateSuffix(d)}</div>
         ))}
       </div>
+      {(invoice.injury_notes || []).length > 0 && (
+        <div style={{ marginBottom: 10 }}>
+          {invoice.injury_notes.map((line, idx) => (
+            <div key={idx} className="tag" style={{ color: "var(--clay)", fontSize: 12 }}>⚠ {line}</div>
+          ))}
+        </div>
+      )}
       <div className="net-divider" style={{ margin: "10px 0" }} />
       {(invoice.students || []).map((s, idx) => (
         <div key={`${s.id}-${idx}`} className="row" style={{ margin: "6px 0" }}>
@@ -1065,6 +1113,13 @@ function downloadInvoicePdf(inv, biller) {
     doc.text("statt.", 20, y); y += 12;
 
     doc.text(`Es handelt sich um eine ${inv.student_count ?? (inv.students || []).length}er Gruppe.`, 20, y); y += 12;
+
+    if ((inv.injury_notes || []).length > 0) {
+      inv.injury_notes.forEach((line) => {
+        doc.text(line, 20, y, { maxWidth: 170 });
+        y += 12;
+      });
+    }
 
     const costLine = isMultiMonth
       ? `Die Kosten für den Zeitraum ${periodLabel(inv)} belaufen sich auf:`
