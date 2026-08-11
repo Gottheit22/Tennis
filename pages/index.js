@@ -174,9 +174,13 @@ export default function Home() {
 
   // ---- Gruppen ----
   const addGroup = async (name, weekday, time, duration, oneOffDate) => {
-    if (!name.trim()) return;
+    if (!name.trim()) return null;
     const { data } = await supabase.from("groups").insert({ name: name.trim(), weekday: oneOffDate ? null : weekday, time, duration, one_off_date: oneOffDate || null }).select();
-    if (data) setGroups((prev) => [...prev, ...data].sort((x, y) => x.name.localeCompare(y.name)));
+    if (data) {
+      setGroups((prev) => [...prev, ...data].sort((x, y) => x.name.localeCompare(y.name)));
+      return data[0];
+    }
+    return null;
   };
   const delGroup = async (id) => {
     await supabase.from("groups").delete().eq("id", id);
@@ -402,7 +406,7 @@ export default function Home() {
         />
       )}
       {tab === "schueler" && (
-        <StudentsTab students={students} groups={groups} onAdd={addStudent} onDelete={delStudent} onUpdate={updateStudent} onStartInjury={startInjury} onEndInjury={endInjury} />
+        <StudentsTab students={students} groups={groups} onAdd={addStudent} onDelete={delStudent} onUpdate={updateStudent} onStartInjury={startInjury} onEndInjury={endInjury} onAddGroup={addGroup} />
       )}
       {tab === "gruppen" && (
         <GroupsTab groups={groups} students={students} onAdd={addGroup} onDelete={delGroup} />
@@ -480,7 +484,68 @@ function GroupMultiSelect({ groups, selected, onToggle }) {
   );
 }
 
-function StudentsTab({ students, groups, onAdd, onDelete, onUpdate, onStartInjury, onEndInjury }) {
+function QuickGroupCreate({ suggestedName, onAddGroup, onCreated }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [oneOff, setOneOff] = useState(true);
+  const [weekday, setWeekday] = useState(0);
+  const [time, setTime] = useState("16:00");
+  const [duration, setDuration] = useState(60);
+  const [oneOffDate, setOneOffDate] = useState("");
+
+  const startOpen = () => {
+    setName(suggestedName || "");
+    setOpen(true);
+  };
+
+  const submit = async () => {
+    if (!name.trim() || (oneOff && !oneOffDate)) return;
+    const created = await onAddGroup(name, weekday, time, duration, oneOff ? oneOffDate : null);
+    if (created) {
+      onCreated(created.id);
+      setOpen(false);
+      setName(""); setOneOffDate("");
+    }
+  };
+
+  if (!open) {
+    return (
+      <button type="button" className="tag" style={{ background: "none", border: "1px dashed var(--line)", borderRadius: 8, padding: "8px 10px", cursor: "pointer", width: "100%", color: "var(--chalk-dim)" }}
+        onClick={startOpen}>
+        + Neue Gruppe / Einzeltraining direkt hier anlegen
+      </button>
+    );
+  }
+  return (
+    <div className="card col" style={{ background: "var(--surface2)" }}>
+      <input placeholder="Bezeichnung (z. B. Einzel - Noah)" value={name} onChange={(e) => setName(e.target.value)} />
+      <label className="row" style={{ cursor: "pointer" }}>
+        <span className="tag" style={{ fontSize: 13, textTransform: "none", letterSpacing: 0 }}>Einmaliges Training (Schnuppertraining)</span>
+        <input type="checkbox" style={{ width: "auto" }} checked={oneOff} onChange={(e) => setOneOff(e.target.checked)} />
+      </label>
+      <div className="gap2">
+        {oneOff ? (
+          <input type="date" value={oneOffDate} onChange={(e) => setOneOffDate(e.target.value)} style={{ flex: 2 }} />
+        ) : (
+          <select value={weekday} onChange={(e) => setWeekday(Number(e.target.value))} style={{ flex: 2 }}>
+            {WEEKDAYS.map((w, i) => <option key={w} value={i}>{w}</option>)}
+          </select>
+        )}
+        <input type="time" value={time} onChange={(e) => setTime(e.target.value)} style={{ flex: 1 }} />
+      </div>
+      <div className="gap2" style={{ alignItems: "center" }}>
+        <input type="number" min="15" step="15" value={duration} onChange={(e) => setDuration(Number(e.target.value))} />
+        <span className="tag" style={{ whiteSpace: "nowrap" }}>Minuten Dauer</span>
+      </div>
+      <div className="gap2">
+        <button className="btn-primary" style={{ flex: 1 }} disabled={oneOff && !oneOffDate} onClick={submit}>Anlegen &amp; zuweisen</button>
+        <button className="btn-primary" style={{ flex: 1, background: "var(--surface2)", color: "var(--chalk)", border: "1px solid var(--line)" }} onClick={() => setOpen(false)}>Abbrechen</button>
+      </div>
+    </div>
+  );
+}
+
+function StudentsTab({ students, groups, onAdd, onDelete, onUpdate, onStartInjury, onEndInjury, onAddGroup }) {
   const [name, setName] = useState("");
   const [groupIds, setGroupIds] = useState([]);
   const [isSchoolchild, setIsSchoolchild] = useState(true);
@@ -502,6 +567,7 @@ function StudentsTab({ students, groups, onAdd, onDelete, onUpdate, onStartInjur
         {groups.length === 0 ? <div className="tag" style={{ color: "var(--clay)" }}>Lege zuerst eine Gruppe an (Tab „Gruppen").</div> : (
           <GroupMultiSelect groups={groups} selected={groupIds} onToggle={toggleGroup} />
         )}
+        <QuickGroupCreate suggestedName={name ? `Einzel - ${name}` : ""} onAddGroup={onAddGroup} onCreated={(gid) => setGroupIds((prev) => [...prev, gid])} />
         <label className="row" style={{ cursor: "pointer" }}>
           <span className="tag" style={{ fontSize: 13, textTransform: "none", letterSpacing: 0 }}>Geht noch zur Schule (betrifft Ferienregelung)</span>
           <input type="checkbox" style={{ width: "auto" }} checked={isSchoolchild} onChange={(e) => setIsSchoolchild(e.target.checked)} />
@@ -514,7 +580,7 @@ function StudentsTab({ students, groups, onAdd, onDelete, onUpdate, onStartInjur
       {students.map((s) => {
         if (editingId === s.id) {
           return (
-            <EditStudentCard key={s.id} student={s} groups={groups} onCancel={() => setEditingId(null)}
+            <EditStudentCard key={s.id} student={s} groups={groups} onAddGroup={onAddGroup} onCancel={() => setEditingId(null)}
               onSave={(patch) => { onUpdate(s.id, patch); setEditingId(null); }} />
           );
         }
@@ -561,7 +627,7 @@ function StudentsTab({ students, groups, onAdd, onDelete, onUpdate, onStartInjur
   );
 }
 
-function EditStudentCard({ student, groups, onSave, onCancel }) {
+function EditStudentCard({ student, groups, onSave, onCancel, onAddGroup }) {
   const [name, setName] = useState(student.name);
   const [groupIds, setGroupIds] = useState(student.group_ids || []);
   const [isSchoolchild, setIsSchoolchild] = useState(!!student.is_schoolchild);
@@ -573,6 +639,7 @@ function EditStudentCard({ student, groups, onSave, onCancel }) {
       <input placeholder="Name des Schülers" value={name} onChange={(e) => setName(e.target.value)} />
       <div className="tag">Gruppen (mehrere möglich)</div>
       <GroupMultiSelect groups={groups} selected={groupIds} onToggle={toggleGroup} />
+      <QuickGroupCreate suggestedName={`Einzel - ${student.name}`} onAddGroup={onAddGroup} onCreated={(gid) => setGroupIds((prev) => [...prev, gid])} />
       <label className="row" style={{ cursor: "pointer" }}>
         <span className="tag" style={{ fontSize: 13, textTransform: "none", letterSpacing: 0 }}>Geht noch zur Schule (betrifft Ferienregelung)</span>
         <input type="checkbox" style={{ width: "auto" }} checked={isSchoolchild} onChange={(e) => setIsSchoolchild(e.target.checked)} />
