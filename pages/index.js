@@ -268,31 +268,35 @@ export default function Home() {
     });
 
     sessions.forEach(({ originalDateIso, entry, effectiveIso }) => {
-      // Pro Termin prüfen, wer an genau diesem Tag verletzt war — nicht pauschal für die ganze Rechnung.
-      const sessionStudents = groupStudents.filter((s) => !isInjuredOn(s, effectiveIso));
-      groupStudents.filter((s) => isInjuredOn(s, effectiveIso)).forEach((s) => injuredNamesAffected.add(s.name));
-      const sessionCount = sessionStudents.length;
-      const sessionSchoolchildCount = sessionStudents.filter((s) => s.is_schoolchild).length;
-
+      const holiday = isBavarianHoliday(effectiveIso);
       const effectiveDuration = entry.duration || group.duration;
       const slotCost = HOURLY_RATE * (effectiveDuration / 60);
-      const flatShare = sessionCount > 0 ? slotCost / sessionCount : 0;
-      heldCount++;
-      const holiday = isBavarianHoliday(effectiveIso);
       let note = "";
+
       if (holiday) {
-        sessionStudents.filter((s) => !s.is_schoolchild).forEach((s) => charges[s.id].push(flatShare));
-        const attendingSchoolchildren = sessionStudents.filter((s) => s.is_schoolchild && entry.present[s.id]);
+        // An Ferienterminen spielt eine Verletzung keine Rolle: Schulkinder zahlen ohnehin
+        // nur, wenn sie tatsächlich anwesend waren; Nicht-Schulkinder zahlen wie gewohnt
+        // pauschal weiter — die Verletzung wird hier bewusst nicht berücksichtigt.
+        const holidaySchoolchildCount = groupStudents.filter((s) => s.is_schoolchild).length;
+        const flatShare = originalGroupSize > 0 ? slotCost / originalGroupSize : 0;
+        groupStudents.filter((s) => !s.is_schoolchild).forEach((s) => charges[s.id].push(flatShare));
+        const attendingSchoolchildren = groupStudents.filter((s) => s.is_schoolchild && entry.present[s.id]);
         if (attendingSchoolchildren.length > 0) {
           const share = slotCost / attendingSchoolchildren.length;
           attendingSchoolchildren.forEach((s) => charges[s.id].push(share));
         }
-        if (sessionSchoolchildCount > 0) {
+        if (holidaySchoolchildCount > 0) {
           note = attendingSchoolchildren.length > 0 ? attendingSchoolchildren.map((s) => s.name).join(", ") : "niemand von den Schulkindern";
         }
       } else {
+        // An regulären Terminen prüfen, wer an genau diesem Tag verletzt war.
+        const sessionStudents = groupStudents.filter((s) => !isInjuredOn(s, effectiveIso));
+        groupStudents.filter((s) => isInjuredOn(s, effectiveIso)).forEach((s) => injuredNamesAffected.add(s.name));
+        const sessionCount = sessionStudents.length;
+        const flatShare = sessionCount > 0 ? slotCost / sessionCount : 0;
         sessionStudents.forEach((s) => charges[s.id].push(flatShare));
       }
+      heldCount++;
       if (entry.duration && entry.duration !== group.duration) {
         note = note ? `${note}; ${entry.duration} Min` : `${entry.duration} Min`;
       }
@@ -377,6 +381,12 @@ export default function Home() {
     setCurrentInvoice((prev) => (prev && prev.id === invoiceId ? { ...prev, students: updatedStudents } : prev));
   };
 
+  const deleteInvoice = async (invoiceId) => {
+    await supabase.from("invoices").delete().eq("id", invoiceId);
+    setInvoices((prev) => prev.filter((i) => i.id !== invoiceId));
+    setCurrentInvoice((prev) => (prev && prev.id === invoiceId ? null : prev));
+  };
+
   if (!ready) return <div className="wrap"><Header /><div className="empty">Lade Daten …</div></div>;
 
   return (
@@ -409,6 +419,7 @@ export default function Home() {
           current={currentInvoice} setCurrent={setCurrentInvoice}
           invoices={invoices}
           onTogglePaid={togglePaid}
+          onDeleteInvoice={deleteInvoice}
           errorMessage={invoiceError}
         />
       )}
@@ -752,7 +763,7 @@ function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, 
   );
 }
 
-function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, fromYear, fromMonthIdx, toYear, toMonthIdx, setFromYear, setFromMonthIdx, setToYear, setToMonthIdx, onGenerate, current, setCurrent, invoices, onTogglePaid, errorMessage }) {
+function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, fromYear, fromMonthIdx, toYear, toMonthIdx, setFromYear, setFromMonthIdx, setToYear, setToMonthIdx, onGenerate, current, setCurrent, invoices, onTogglePaid, onDeleteInvoice, errorMessage }) {
   const [billerName, setBillerName] = useState(biller.name);
   const [billerAddress, setBillerAddress] = useState(biller.address);
   const [paymentInfo, setPaymentInfo] = useState(biller.paymentInfo);
@@ -809,7 +820,7 @@ function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, fromYe
         <div className="tag">Für nur einen Monat einfach bei „Von" und „Bis" denselben Monat wählen. Erstellt eine gemeinsame PDF für die ganze Gruppe.</div>
       </div>
 
-      {current && <InvoiceView invoice={current} biller={biller} onTogglePaid={onTogglePaid} />}
+      {current && <InvoiceView invoice={current} biller={biller} onTogglePaid={onTogglePaid} onDelete={onDeleteInvoice} />}
 
       <div className="net-divider" />
       <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Übersicht nach Gruppe</div>
@@ -915,8 +926,9 @@ function dateSuffix(d) {
   return parts.length ? ` (${parts.join("; ")})` : "";
 }
 
-function InvoiceView({ invoice, biller, onTogglePaid }) {
+function InvoiceView({ invoice, biller, onTogglePaid, onDelete }) {
   const dates = invoice.dates || [];
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   return (
     <div className="card" style={{ marginTop: 16 }}>
       <div className="disp" style={{ fontSize: 16, marginBottom: 10 }}>{invoice.group_name} — {periodLabel(invoice)}</div>
@@ -951,6 +963,25 @@ function InvoiceView({ invoice, biller, onTogglePaid }) {
       <div className="net-divider" style={{ margin: "10px 0" }} />
       <div className="row"><span className="disp" style={{ fontSize: 16 }}>Gesamt</span><span className="disp" style={{ fontSize: 18, color: "var(--ball)" }}>{fmtEUR(invoice.total)}</span></div>
       <button className="btn-primary" style={{ marginTop: 12 }} onClick={() => downloadInvoicePdf(invoice, biller)}>⬇ PDF erneut herunterladen</button>
+      {onDelete && !confirmingDelete && (
+        <button className="tag" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--clay)", marginTop: 12, width: "100%", textAlign: "center" }}
+          onClick={() => setConfirmingDelete(true)}>
+          ✕ Rechnung löschen
+        </button>
+      )}
+      {onDelete && confirmingDelete && (
+        <div className="col" style={{ marginTop: 12, gap: 8 }}>
+          <div className="tag" style={{ color: "var(--clay)", textAlign: "center" }}>Wirklich unwiderruflich löschen?</div>
+          <div className="gap2">
+            <button className="btn-primary" style={{ flex: 1, background: "var(--clay)", color: "var(--chalk)" }} onClick={() => { onDelete(invoice.id); setConfirmingDelete(false); }}>
+              Ja, löschen
+            </button>
+            <button className="btn-primary" style={{ flex: 1, background: "var(--surface2)", color: "var(--chalk)" }} onClick={() => setConfirmingDelete(false)}>
+              Abbrechen
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
