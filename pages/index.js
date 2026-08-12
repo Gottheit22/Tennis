@@ -82,7 +82,85 @@ function sessionDates(group, year, monthIdx) {
   return datesForMonth(year, monthIdx, group.weekday);
 }
 
-export default function Home() {
+export default function App() {
+  const [session, setSession] = useState(undefined); // undefined = wird geladen, null = ausgeloggt
+  const [profile, setProfile] = useState(null);
+  const [allProfiles, setAllProfiles] = useState([]);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session ?? null));
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, sess) => setSession(sess));
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!session) { setProfile(null); return; }
+    (async () => {
+      const { data } = await supabase.from("profiles").select("*").eq("id", session.user.id).maybeSingle();
+      setProfile(data || { id: session.user.id, email: session.user.email, is_admin: false });
+      if (data?.is_admin) {
+        const { data: all } = await supabase.from("profiles").select("*").order("email");
+        setAllProfiles(all || []);
+      } else {
+        setAllProfiles([]);
+      }
+    })();
+  }, [session]);
+
+  if (session === undefined) return <div className="wrap"><div className="empty">Lade …</div></div>;
+  if (!session) return <Login />;
+  if (!profile) return <div className="wrap"><div className="empty">Lade Profil …</div></div>;
+
+  return <Dashboard session={session} profile={profile} allProfiles={allProfiles} />;
+}
+
+function Login() {
+  const [mode, setMode] = useState("login"); // "login" | "signup"
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const submit = async () => {
+    setError(""); setInfo(""); setLoading(true);
+    if (mode === "login") {
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) setError(error.message);
+    } else {
+      const { error } = await supabase.auth.signUp({ email, password });
+      if (error) setError(error.message);
+      else setInfo("Konto erstellt. Falls eine Bestätigungs-E-Mail nötig ist, prüfe dein Postfach — sonst kannst du dich jetzt direkt anmelden.");
+    }
+    setLoading(false);
+  };
+
+  return (
+    <div className="wrap">
+      <Header />
+      <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>{mode === "login" ? "Anmelden" : "Konto erstellen"}</div>
+      <div className="card col">
+        <input placeholder="E-Mail" type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
+        <input placeholder="Passwort" type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+        {error && <div className="tag" style={{ color: "var(--clay)" }}>⚠ {error}</div>}
+        {info && <div className="tag" style={{ color: "var(--paid-green)" }}>{info}</div>}
+        <button className="btn-primary" disabled={loading || !email || !password} onClick={submit}>
+          {mode === "login" ? "Anmelden" : "Konto erstellen"}
+        </button>
+        <button className="tag" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--chalk-dim)" }}
+          onClick={() => { setMode(mode === "login" ? "signup" : "login"); setError(""); setInfo(""); }}>
+          {mode === "login" ? "Noch kein Konto? Registrieren" : "Schon ein Konto? Anmelden"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Dashboard({ session, profile, allProfiles }) {
+  const [viewOwnerId, setViewOwnerId] = useState(session.user.id);
+  const writeOwnerId = viewOwnerId === "all" ? session.user.id : viewOwnerId;
+  const ownerFilter = (query) => (viewOwnerId === "all" ? query : query.eq("owner_id", viewOwnerId));
+
   const [tab, setTab] = useState("training");
   const [ready, setReady] = useState(false);
   const [students, setStudents] = useState([]);
@@ -104,13 +182,14 @@ export default function Home() {
   const [invoiceError, setInvoiceError] = useState(null);
 
   const loadAll = useCallback(async () => {
+    setReady(false);
     const [g, s, sg, a, inv, b] = await Promise.all([
-      supabase.from("groups").select("*").order("name"),
-      supabase.from("students").select("*").order("name"),
-      supabase.from("student_groups").select("*"),
-      supabase.from("attendance").select("*"),
-      supabase.from("invoices").select("*").order("generated_at", { ascending: false }),
-      supabase.from("biller").select("*").eq("id", 1).maybeSingle(),
+      ownerFilter(supabase.from("groups").select("*")).order("name"),
+      ownerFilter(supabase.from("students").select("*")).order("name"),
+      ownerFilter(supabase.from("student_groups").select("*")),
+      ownerFilter(supabase.from("attendance").select("*")),
+      ownerFilter(supabase.from("invoices").select("*")).order("generated_at", { ascending: false }),
+      supabase.from("biller").select("*").eq("owner_id", writeOwnerId).maybeSingle(),
     ]);
     setGroups(g.data || []);
     const groupIdsByStudent = {};
@@ -125,8 +204,9 @@ export default function Home() {
     setAttendance(attMap);
     setInvoices(inv.data || []);
     if (b.data) setBiller({ name: b.data.name || "", address: b.data.address || "", paymentInfo: b.data.payment_info || "" });
+    else setBiller({ name: "", address: "", paymentInfo: "" });
     setReady(true);
-  }, []);
+  }, [viewOwnerId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { loadAll(); }, [loadAll]);
   useEffect(() => {
@@ -137,11 +217,11 @@ export default function Home() {
   // ---- Schüler ----
   const addStudent = async (name, groupIds, isSchoolchild) => {
     if (!name.trim()) return;
-    const { data } = await supabase.from("students").insert({ name: name.trim(), is_schoolchild: isSchoolchild }).select();
+    const { data } = await supabase.from("students").insert({ name: name.trim(), is_schoolchild: isSchoolchild, owner_id: writeOwnerId }).select();
     const student = data && data[0];
     if (!student) return;
     if (groupIds.length > 0) {
-      await supabase.from("student_groups").insert(groupIds.map((gid) => ({ student_id: student.id, group_id: gid })));
+      await supabase.from("student_groups").insert(groupIds.map((gid) => ({ student_id: student.id, group_id: gid, owner_id: writeOwnerId })));
     }
     setStudents((prev) => [...prev, { ...student, group_ids: groupIds, injuries: [] }].sort((x, y) => x.name.localeCompare(y.name)));
   };
@@ -153,7 +233,7 @@ export default function Home() {
     const { data } = await supabase.from("students").update({ name, is_schoolchild }).eq("id", id).select().maybeSingle();
     await supabase.from("student_groups").delete().eq("student_id", id);
     if (groupIds.length > 0) {
-      await supabase.from("student_groups").insert(groupIds.map((gid) => ({ student_id: id, group_id: gid })));
+      await supabase.from("student_groups").insert(groupIds.map((gid) => ({ student_id: id, group_id: gid, owner_id: writeOwnerId })));
     }
     setStudents((prev) => prev.map((s) => (s.id === id ? { ...s, ...(data || { name, is_schoolchild }), group_ids: groupIds } : s)).sort((x, y) => x.name.localeCompare(y.name)));
   };
@@ -182,7 +262,7 @@ export default function Home() {
   // ---- Gruppen ----
   const addGroup = async (name, weekday, time, duration, oneOffDate) => {
     if (!name.trim()) return null;
-    const { data } = await supabase.from("groups").insert({ name: name.trim(), weekday: oneOffDate ? null : weekday, time, duration, one_off_date: oneOffDate || null }).select();
+    const { data } = await supabase.from("groups").insert({ name: name.trim(), weekday: oneOffDate ? null : weekday, time, duration, one_off_date: oneOffDate || null, owner_id: writeOwnerId }).select();
     if (data) {
       setGroups((prev) => [...prev, ...data].sort((x, y) => x.name.localeCompare(y.name)));
       return data[0];
@@ -201,7 +281,7 @@ export default function Home() {
     const next = { ...existing, ...patch };
     const { data } = await supabase
       .from("attendance")
-      .upsert({ id: existing.id, group_id: groupId, date: dateIso, cancelled: next.cancelled, present: next.present, moved_to: next.moved_to || null, duration: next.duration || null }, { onConflict: "group_id,date" })
+      .upsert({ id: existing.id, group_id: groupId, date: dateIso, cancelled: next.cancelled, present: next.present, moved_to: next.moved_to || null, duration: next.duration || null, owner_id: writeOwnerId }, { onConflict: "group_id,date" })
       .select()
       .maybeSingle();
     setAttendance((prev) => ({ ...prev, [key]: data || { ...next, group_id: groupId, date: dateIso } }));
@@ -225,7 +305,7 @@ export default function Home() {
   // ---- Rechnung ----
   const saveBiller = async (name, address, paymentInfo) => {
     setBiller({ name, address, paymentInfo });
-    await supabase.from("biller").upsert({ id: 1, name, address, payment_info: paymentInfo });
+    await supabase.from("biller").upsert({ owner_id: writeOwnerId, name, address, payment_info: paymentInfo }, { onConflict: "owner_id" });
   };
 
   const generateInvoice = async (groupId, fromYear, fromMonthIdx, toYear, toMonthIdx) => {
@@ -351,6 +431,7 @@ export default function Home() {
 
     const record = {
       id: newUuid(),
+      owner_id: writeOwnerId,
       group_id: groupId,
       group_name: group.name,
       year: fromYear,
@@ -398,11 +479,11 @@ export default function Home() {
     setCurrentInvoice((prev) => (prev && prev.id === invoiceId ? null : prev));
   };
 
-  if (!ready) return <div className="wrap"><Header /><div className="empty">Lade Daten …</div></div>;
+  if (!ready) return <div className="wrap"><Header profile={profile} allProfiles={allProfiles} viewOwnerId={viewOwnerId} setViewOwnerId={setViewOwnerId} /><div className="empty">Lade Daten …</div></div>;
 
   return (
     <div className="wrap">
-      <Header />
+      <Header profile={profile} allProfiles={allProfiles} viewOwnerId={viewOwnerId} setViewOwnerId={setViewOwnerId} />
       {tab === "training" && (
         <TrainingTab
           groups={groups} students={students} attendance={attendance}
@@ -440,14 +521,27 @@ export default function Home() {
   );
 }
 
-function Header() {
+function Header({ profile, allProfiles, viewOwnerId, setViewOwnerId }) {
   return (
-    <div className="header">
-      <div className="logo">●</div>
-      <div>
-        <div className="disp" style={{ fontSize: 20, fontWeight: 600, lineHeight: 1 }}>AUFSCHLAG</div>
-        <div className="tag" style={{ marginTop: 4 }}>Training &amp; Abrechnung</div>
+    <div>
+      <div className="header" style={{ justifyContent: "space-between" }}>
+        <div className="row" style={{ gap: 12 }}>
+          <div className="logo">●</div>
+          <div>
+            <div className="disp" style={{ fontSize: 20, fontWeight: 600, lineHeight: 1 }}>AUFSCHLAG</div>
+            <div className="tag" style={{ marginTop: 4 }}>Training &amp; Abrechnung</div>
+          </div>
+        </div>
+        <button className="icon-btn" style={{ color: "var(--chalk-dim)", fontSize: 11 }} onClick={() => supabase.auth.signOut()}>Abmelden</button>
       </div>
+      {profile?.is_admin && allProfiles.length > 0 && (
+        <select value={viewOwnerId} onChange={(e) => setViewOwnerId(e.target.value)} style={{ marginBottom: 16 }}>
+          {allProfiles.map((p) => (
+            <option key={p.id} value={p.id}>{p.id === profile.id ? `Meine Daten (${p.email})` : (p.name || p.email)}</option>
+          ))}
+          <option value="all">Alle Coaches (Admin-Ansicht)</option>
+        </select>
+      )}
     </div>
   );
 }
@@ -552,7 +646,7 @@ function QuickGroupCreate({ suggestedName, onAddGroup, onCreated }) {
   );
 }
 
-function StudentsTab({ students, groups, onAdd, onDelete, onUpdate, onStartInjury, onEndInjury, onAddGroup }) {
+function StudentsTab({ students, groups, onAdd, onDelete, onUpdate, onStartInjury, onEndInjury, onRemoveInjury, onAddGroup }) {
   const [name, setName] = useState("");
   const [groupIds, setGroupIds] = useState([]);
   const [isSchoolchild, setIsSchoolchild] = useState(true);
