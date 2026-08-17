@@ -1445,7 +1445,7 @@ function downloadInvoicePdfTable(inv, biller) {
     const rowStartY = y;
     const headerH = 10;
 
-    doc.setFillColor(146, 247, 38); // Grün wie im Logo
+    doc.setFillColor(120, 199, 30); // Grün wie in der Gesamt-Zeile
     doc.rect(left, y, right - left, headerH, "F");
     doc.setFont("helvetica", "bold"); doc.setFontSize(11);
     doc.setTextColor(0, 0, 0);
