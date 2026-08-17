@@ -1463,6 +1463,7 @@ function downloadInvoicePdfTable(inv, biller) {
     doc.text("Termine:", colX[0] + 2, y + 6.5);
     doc.text("Teilnehmer:", colX[1] + 2, y + 6.5);
     doc.text("Kosten:", colX[2] + 2, y + 6.5);
+    doc.setTextColor(0, 0, 0);
     y += headerH;
 
     doc.setFont("helvetica", "normal"); doc.setFontSize(10);
