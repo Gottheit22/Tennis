@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { supabase } from "../lib/supabaseClient";
 import { LOGO_DATA_URL } from "../lib/logo";
+import { JULIAN_LOGO_DATA_URL } from "../lib/logo-julian";
 
 const WEEKDAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
 const MONTHS = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"];
@@ -10,11 +11,11 @@ const DEFAULT_LAYOUT = "letter"; // "letter" (Brief-Format) oder "table" (Tabell
 // Fest im Code hinterlegte, nicht veränderbare Einstellungen pro Nutzer (Coach).
 // Schlüssel = Supabase-Nutzer-ID (Authentication → Users → UID).
 const OWNER_SETTINGS = {
-  "92dbf063-ac9f-4e3b-854a-e67763d76234": { hourlyRate: 36, layout: "letter" }, // du
-  "f923a209-ae8b-4e8d-a24c-05c709ea0724": { hourlyRate: 30, layout: "table" }, // Julian
+  "92dbf063-ac9f-4e3b-854a-e67763d76234": { hourlyRate: 36, layout: "letter", logo: LOGO_DATA_URL }, // du (r.mischler22)
+  "f923a209-ae8b-4e8d-a24c-05c709ea0724": { hourlyRate: 30, layout: "table", logo: JULIAN_LOGO_DATA_URL }, // Julian
 };
 function ownerSettings(ownerId) {
-  return OWNER_SETTINGS[ownerId] || { hourlyRate: HOURLY_RATE, layout: DEFAULT_LAYOUT };
+  return OWNER_SETTINGS[ownerId] || { hourlyRate: HOURLY_RATE, layout: DEFAULT_LAYOUT, logo: LOGO_DATA_URL };
 }
 
 const fmtEUR = (n) => (n || 0).toLocaleString("de-DE", { style: "currency", currency: "EUR" });
@@ -969,27 +970,6 @@ function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, fromYe
   useEffect(() => { setBillerName(biller.name); setBillerAddress(biller.address); setPaymentInfo(biller.paymentInfo); }, [biller]);
   const persistBiller = () => onSaveBiller(billerName, billerAddress, paymentInfo);
 
-  const handleLogoFile = (file) => {
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const img = new Image();
-      img.onload = () => {
-        const maxWidth = 500;
-        const scale = Math.min(1, maxWidth / img.width);
-        const canvas = document.createElement("canvas");
-        canvas.width = img.width * scale;
-        canvas.height = img.height * scale;
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL("image/png");
-        onSaveBiller(billerName, billerAddress, paymentInfo, dataUrl);
-      };
-      img.src = reader.result;
-    };
-    reader.readAsDataURL(file);
-  };
-
   const activeGroupId = groupId || groups[0]?.id;
   const rangeInvalid = toYear < fromYear || (toYear === fromYear && toMonthIdx < fromMonthIdx);
   const groupInvoices = invoices.filter((i) => i.group_id === activeGroupId).sort((a, b) => monthNum(b.year, b.month_idx) - monthNum(a.year, a.month_idx));
@@ -1002,21 +982,6 @@ function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, fromYe
         <input placeholder="Dein Name (für Grußformel)" value={billerName} onChange={(e) => setBillerName(e.target.value)} onBlur={persistBiller} />
         <input placeholder="Adresse (optional)" value={billerAddress} onChange={(e) => setBillerAddress(e.target.value)} onBlur={persistBiller} />
         <input placeholder="Zahlungsinfo (z. B. PayPal/IBAN)" value={paymentInfo} onChange={(e) => setPaymentInfo(e.target.value)} onBlur={persistBiller} />
-        <div className="tag">Eigenes Logo (erscheint oben rechts auf deiner PDF-Rechnung)</div>
-        <div className="row" style={{ gap: 10 }}>
-          {biller.logoDataUrl ? (
-            <img src={biller.logoDataUrl} alt="Logo" style={{ height: 40, borderRadius: 6, background: "#fff", padding: 2 }} />
-          ) : (
-            <span className="tag">Aktuell: Standard-Logo</span>
-          )}
-          <label className="btn-primary" style={{ padding: "8px 14px", cursor: "pointer", display: "inline-flex" }}>
-            Logo hochladen
-            <input type="file" accept="image/*" style={{ display: "none" }} onChange={(e) => handleLogoFile(e.target.files?.[0])} />
-          </label>
-          {biller.logoDataUrl && (
-            <button className="icon-btn" style={{ color: "var(--chalk-dim)" }} onClick={() => onSaveBiller(billerName, billerAddress, paymentInfo, "")}>Zurücksetzen</button>
-          )}
-        </div>
       </div>
       <div className="card col">
         {groups.length === 0 ? <div className="tag">Keine Gruppen vorhanden</div> : (
@@ -1341,17 +1306,14 @@ function OpenPaymentsTab({ invoices, onTogglePaid }) {
 
 }
 
-async function loadLogo(biller) {
-  const logoUrl = biller?.logoDataUrl || LOGO_DATA_URL;
-  let logoAspect = 249 / 500; // Standard-Logo-Verhältnis als Fallback
-  if (biller?.logoDataUrl) {
-    logoAspect = await new Promise((resolve) => {
-      const img = new Image();
-      img.onload = () => resolve(img.height / img.width);
-      img.onerror = () => resolve(249 / 500);
-      img.src = logoUrl;
-    });
-  }
+async function loadLogo(ownerId) {
+  const logoUrl = ownerSettings(ownerId).logo || LOGO_DATA_URL;
+  const logoAspect = await new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve(img.height / img.width);
+    img.onerror = () => resolve(249 / 500);
+    img.src = logoUrl;
+  });
   return { logoUrl, logoAspect };
 }
 
@@ -1370,7 +1332,7 @@ function downloadInvoicePdfLetter(inv, biller) {
     let y = 48;
     const isMultiMonth = periodLabel(inv).includes("–");
 
-    const { logoUrl, logoAspect } = await loadLogo(biller);
+    const { logoUrl, logoAspect } = await loadLogo(inv.owner_id);
     const logoWidth = 70;
     const logoHeight = logoWidth * logoAspect;
     doc.addImage(logoUrl, "PNG", pageWidth - 20 - logoWidth, 14, logoWidth, logoHeight);
@@ -1449,7 +1411,7 @@ function downloadInvoicePdfTable(inv, biller) {
     const left = 20, right = 190;
     const dates = inv.dates || [];
 
-    const { logoUrl, logoAspect } = await loadLogo(biller);
+    const { logoUrl, logoAspect } = await loadLogo(inv.owner_id);
     const logoWidth = 32;
     const logoHeight = logoWidth * logoAspect;
     doc.addImage(logoUrl, "PNG", right - logoWidth, 14, logoWidth, logoHeight);
