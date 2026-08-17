@@ -1411,7 +1411,7 @@ function downloadInvoicePdfTable(inv, biller) {
     const { logoUrl, logoAspect } = loadLogo(inv.owner_id);
     const logoWidth = 55;
     const logoHeight = logoWidth * logoAspect;
-    doc.addImage(logoUrl, "PNG", right - logoWidth, 12, logoWidth, logoHeight);
+    doc.addImage(logoUrl, "PNG", pageWidth - 12 - logoWidth, 8, logoWidth, logoHeight);
 
     doc.setFont("helvetica", "normal"); doc.setFontSize(11);
     doc.text(`Gruppe: ${inv.group_name}`, left, 20);
@@ -1459,20 +1459,25 @@ function downloadInvoicePdfTable(inv, biller) {
     dates.forEach((d, idx) => {
       const participants = d.participants || [];
       const rows = participants.length > 0 ? participants : [{ name: "—", amount: null }];
-      const rowH = Math.max(9, rows.length * 5.5 + 3);
+      const suffix = dateSuffix(d).trim();
+      // Zeilenhöhe muss auch den (ggf. mehrzeiligen) Hinweistext unter dem Datum berücksichtigen.
+      doc.setFontSize(8);
+      const suffixLines = suffix ? doc.splitTextToSize(suffix, colW[0] - 4) : [];
+      doc.setFontSize(10);
+      const namesHeight = rows.length * 5.5 + 3;
+      const dateColHeight = 6 + (suffixLines.length ? 4 + suffixLines.length * 3.2 : 0) + 2;
+      const rowH = Math.max(9, namesHeight, dateColHeight);
 
       if (idx % 2 === 1) {
         doc.setFillColor(253, 226, 205);
         doc.rect(left, y, right - left, rowH, "F");
       }
       doc.setFont("helvetica", "bold");
-      let dateText = dateLabel(d.dateIso);
-      const suffix = dateSuffix(d);
-      doc.text(dateText, colX[0] + 2, y + 6);
+      doc.text(dateLabel(d.dateIso), colX[0] + 2, y + 6);
       doc.setFont("helvetica", "normal");
-      if (suffix) {
+      if (suffixLines.length) {
         doc.setFontSize(8);
-        doc.text(suffix.trim(), colX[0] + 2, y + 6 + 4, { maxWidth: colW[0] - 4 });
+        doc.text(suffixLines, colX[0] + 2, y + 6 + 3.6, { lineHeightFactor: 1.15 });
         doc.setFontSize(10);
       }
       rows.forEach((p, i) => {
