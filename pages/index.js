@@ -1417,7 +1417,8 @@ function downloadInvoicePdfTable(inv, biller) {
     const doc = new jsPDF({ unit: "mm", format: "a4" });
     const pageWidth = 210;
     const left = 20, right = 190;
-    const dates = inv.dates || [];
+    // Ferientermine ohne Teilnehmer (niemand da) tauchen erst gar nicht in der Tabelle auf.
+    const dates = (inv.dates || []).filter((d) => !(d.holiday && (!d.participants || d.participants.length === 0)));
 
     const { logoUrl, logoAspect } = loadLogo(inv.owner_id);
     const logoWidth = 55;
@@ -1507,10 +1508,10 @@ function downloadInvoicePdfTable(inv, biller) {
       y += rowH;
     });
 
-    // Fußzeile: pro Schüler die Gesamtsumme für den Zeitraum, plus Gesamtbetrag unten
+    // Fußzeile: pro Schüler die Gesamtsumme für den Zeitraum
     const students = inv.students || [];
     const lineH = 7;
-    const totalRowH = students.length * lineH + 6 + 10;
+    const totalRowH = students.length * lineH + 6;
     doc.setFillColor(15, 75, 17);
     doc.rect(left, y, right - left, totalRowH, "F");
     doc.setTextColor(255, 255, 255);
@@ -1522,14 +1523,6 @@ function downloadInvoicePdfTable(inv, biller) {
       doc.text(fmtEUR(s.total), colX[2] + 2, sy);
       sy += lineH;
     });
-
-    sy += 2;
-    doc.setDrawColor(255, 255, 255);
-    doc.setLineWidth(0.3);
-    doc.line(left + 4, sy - 5, right - 4, sy - 5);
-    doc.setFont("helvetica", "bold"); doc.setFontSize(12);
-    doc.text("Gesamt:", colX[1] + 2, sy);
-    doc.text(fmtEUR(inv.total), colX[2] + 2, sy);
     y += totalRowH;
 
     doc.setDrawColor(120);
