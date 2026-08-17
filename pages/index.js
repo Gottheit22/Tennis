@@ -4,7 +4,18 @@ import { LOGO_DATA_URL } from "../lib/logo";
 
 const WEEKDAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
 const MONTHS = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"];
-const HOURLY_RATE = 36;
+const HOURLY_RATE = 36; // Standard-Stundensatz, falls für einen Nutzer nichts anderes hinterlegt ist
+const DEFAULT_LAYOUT = "letter"; // "letter" (Brief-Format) oder "table" (Tabellen-Format)
+
+// Fest im Code hinterlegte, nicht veränderbare Einstellungen pro Nutzer (Coach).
+// Schlüssel = Supabase-Nutzer-ID (Authentication → Users → UID).
+const OWNER_SETTINGS = {
+  "92dbf063-ac9f-4e3b-854a-e67763d76234": { hourlyRate: 36, layout: "letter" }, // du
+  "f923a209-ae8b-4e8d-a24c-05c709ea0724": { hourlyRate: 30, layout: "table" }, // Julian
+};
+function ownerSettings(ownerId) {
+  return OWNER_SETTINGS[ownerId] || { hourlyRate: HOURLY_RATE, layout: DEFAULT_LAYOUT };
+}
 
 const fmtEUR = (n) => (n || 0).toLocaleString("de-DE", { style: "currency", currency: "EUR" });
 const isoDate = (d) => {
@@ -167,7 +178,7 @@ function Dashboard({ session, profile, allProfiles }) {
   const [groups, setGroups] = useState([]);
   const [attendance, setAttendance] = useState({}); // key: groupId__date -> {id, cancelled, present}
   const [invoices, setInvoices] = useState([]);
-  const [biller, setBiller] = useState({ name: "", address: "", paymentInfo: "" });
+  const [biller, setBiller] = useState({ name: "", address: "", paymentInfo: "", logoDataUrl: "" });
 
   const [trainingGroupId, setTrainingGroupId] = useState(null);
   const [trainingYear, setTrainingYear] = useState(new Date().getFullYear());
@@ -203,8 +214,8 @@ function Dashboard({ session, profile, allProfiles }) {
     });
     setAttendance(attMap);
     setInvoices(inv.data || []);
-    if (b.data) setBiller({ name: b.data.name || "", address: b.data.address || "", paymentInfo: b.data.payment_info || "" });
-    else setBiller({ name: "", address: "", paymentInfo: "" });
+    if (b.data) setBiller({ name: b.data.name || "", address: b.data.address || "", paymentInfo: b.data.payment_info || "", logoDataUrl: b.data.logo_data_url || "" });
+    else setBiller({ name: "", address: "", paymentInfo: "", logoDataUrl: "" });
     setReady(true);
   }, [viewOwnerId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -303,9 +314,11 @@ function Dashboard({ session, profile, allProfiles }) {
   };
 
   // ---- Rechnung ----
-  const saveBiller = async (name, address, paymentInfo) => {
-    setBiller({ name, address, paymentInfo });
-    await supabase.from("biller").upsert({ owner_id: writeOwnerId, name, address, payment_info: paymentInfo }, { onConflict: "owner_id" });
+  const saveBiller = async (name, address, paymentInfo, logoDataUrl) => {
+    setBiller((prev) => ({ ...prev, name, address, paymentInfo, ...(logoDataUrl !== undefined ? { logoDataUrl } : {}) }));
+    const payload = { owner_id: writeOwnerId, name, address, payment_info: paymentInfo };
+    if (logoDataUrl !== undefined) payload.logo_data_url = logoDataUrl;
+    await supabase.from("biller").upsert(payload, { onConflict: "owner_id" });
   };
 
   const generateInvoice = async (groupId, fromYear, fromMonthIdx, toYear, toMonthIdx) => {
@@ -361,8 +374,9 @@ function Dashboard({ session, profile, allProfiles }) {
     sessions.forEach(({ originalDateIso, entry, effectiveIso }) => {
       const holiday = isBavarianHoliday(effectiveIso);
       const effectiveDuration = entry.duration || group.duration;
-      const slotCost = HOURLY_RATE * (effectiveDuration / 60);
+      const slotCost = ownerSettings(writeOwnerId).hourlyRate * (effectiveDuration / 60);
       let note = "";
+      const sessionParticipants = []; // [{name, amount}] — für das Tabellen-Layout
 
       if (holiday) {
         // An Ferienterminen spielt eine Verletzung keine Rolle: Schulkinder zahlen ohnehin
@@ -370,11 +384,11 @@ function Dashboard({ session, profile, allProfiles }) {
         // pauschal weiter — die Verletzung wird hier bewusst nicht berücksichtigt.
         const holidaySchoolchildCount = groupStudents.filter((s) => s.is_schoolchild).length;
         const flatShare = originalGroupSize > 0 ? slotCost / originalGroupSize : 0;
-        groupStudents.filter((s) => !s.is_schoolchild).forEach((s) => charges[s.id].push(flatShare));
+        groupStudents.filter((s) => !s.is_schoolchild).forEach((s) => { charges[s.id].push(flatShare); sessionParticipants.push({ name: s.name, amount: flatShare }); });
         const attendingSchoolchildren = groupStudents.filter((s) => s.is_schoolchild && entry.present[s.id]);
         if (attendingSchoolchildren.length > 0) {
           const share = slotCost / attendingSchoolchildren.length;
-          attendingSchoolchildren.forEach((s) => charges[s.id].push(share));
+          attendingSchoolchildren.forEach((s) => { charges[s.id].push(share); sessionParticipants.push({ name: s.name, amount: share }); });
         }
         if (holidaySchoolchildCount > 0) {
           note = attendingSchoolchildren.length > 0 ? attendingSchoolchildren.map((s) => s.name).join(", ") : "niemand von den Schulkindern";
@@ -385,14 +399,14 @@ function Dashboard({ session, profile, allProfiles }) {
         groupStudents.filter((s) => isInjuredOn(s, effectiveIso)).forEach((s) => injuredNamesAffected.add(s.name));
         const sessionCount = sessionStudents.length;
         const flatShare = sessionCount > 0 ? slotCost / sessionCount : 0;
-        sessionStudents.forEach((s) => charges[s.id].push(flatShare));
+        sessionStudents.forEach((s) => { charges[s.id].push(flatShare); sessionParticipants.push({ name: s.name, amount: flatShare }); });
       }
       heldCount++;
       if (entry.duration && entry.duration !== group.duration) {
         note = note ? `${note}; ${entry.duration} Min` : `${entry.duration} Min`;
       }
       const [ey, em] = effectiveIso.split("-").map(Number);
-      dateEntries.push({ dateIso: effectiveIso, holiday, note, monthIdx: em - 1, year: ey, movedFromIso: entry.moved_to ? originalDateIso : null });
+      dateEntries.push({ dateIso: effectiveIso, holiday, note, monthIdx: em - 1, year: ey, movedFromIso: entry.moved_to ? originalDateIso : null, participants: sessionParticipants });
     });
     dateEntries.sort((a, b) => a.dateIso.localeCompare(b.dateIso));
 
@@ -952,6 +966,27 @@ function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, fromYe
   useEffect(() => { setBillerName(biller.name); setBillerAddress(biller.address); setPaymentInfo(biller.paymentInfo); }, [biller]);
   const persistBiller = () => onSaveBiller(billerName, billerAddress, paymentInfo);
 
+  const handleLogoFile = (file) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const maxWidth = 500;
+        const scale = Math.min(1, maxWidth / img.width);
+        const canvas = document.createElement("canvas");
+        canvas.width = img.width * scale;
+        canvas.height = img.height * scale;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const dataUrl = canvas.toDataURL("image/png");
+        onSaveBiller(billerName, billerAddress, paymentInfo, dataUrl);
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  };
+
   const activeGroupId = groupId || groups[0]?.id;
   const rangeInvalid = toYear < fromYear || (toYear === fromYear && toMonthIdx < fromMonthIdx);
   const groupInvoices = invoices.filter((i) => i.group_id === activeGroupId).sort((a, b) => monthNum(b.year, b.month_idx) - monthNum(a.year, a.month_idx));
@@ -964,6 +999,21 @@ function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, fromYe
         <input placeholder="Dein Name (für Grußformel)" value={billerName} onChange={(e) => setBillerName(e.target.value)} onBlur={persistBiller} />
         <input placeholder="Adresse (optional)" value={billerAddress} onChange={(e) => setBillerAddress(e.target.value)} onBlur={persistBiller} />
         <input placeholder="Zahlungsinfo (z. B. PayPal/IBAN)" value={paymentInfo} onChange={(e) => setPaymentInfo(e.target.value)} onBlur={persistBiller} />
+        <div className="tag">Eigenes Logo (erscheint oben rechts auf deiner PDF-Rechnung)</div>
+        <div className="row" style={{ gap: 10 }}>
+          {biller.logoDataUrl ? (
+            <img src={biller.logoDataUrl} alt="Logo" style={{ height: 40, borderRadius: 6, background: "#fff", padding: 2 }} />
+          ) : (
+            <span className="tag">Aktuell: Standard-Logo</span>
+          )}
+          <label className="btn-primary" style={{ padding: "8px 14px", cursor: "pointer", display: "inline-flex" }}>
+            Logo hochladen
+            <input type="file" accept="image/*" style={{ display: "none" }} onChange={(e) => handleLogoFile(e.target.files?.[0])} />
+          </label>
+          {biller.logoDataUrl && (
+            <button className="icon-btn" style={{ color: "var(--chalk-dim)" }} onClick={() => onSaveBiller(billerName, billerAddress, paymentInfo, "")}>Zurücksetzen</button>
+          )}
+        </div>
       </div>
       <div className="card col">
         {groups.length === 0 ? <div className="tag">Keine Gruppen vorhanden</div> : (
@@ -1288,8 +1338,28 @@ function OpenPaymentsTab({ invoices, onTogglePaid }) {
 
 }
 
+async function loadLogo(biller) {
+  const logoUrl = biller?.logoDataUrl || LOGO_DATA_URL;
+  let logoAspect = 249 / 500; // Standard-Logo-Verhältnis als Fallback
+  if (biller?.logoDataUrl) {
+    logoAspect = await new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve(img.height / img.width);
+      img.onerror = () => resolve(249 / 500);
+      img.src = logoUrl;
+    });
+  }
+  return { logoUrl, logoAspect };
+}
+
 function downloadInvoicePdf(inv, biller) {
-  import("jspdf").then(({ jsPDF }) => {
+  const layout = ownerSettings(inv.owner_id).layout;
+  if (layout === "table") return downloadInvoicePdfTable(inv, biller);
+  return downloadInvoicePdfLetter(inv, biller);
+}
+
+function downloadInvoicePdfLetter(inv, biller) {
+  import("jspdf").then(async ({ jsPDF }) => {
     const doc = new jsPDF({ unit: "mm", format: "a4" });
     const pageWidth = 210;
     const center = pageWidth / 2;
@@ -1297,9 +1367,10 @@ function downloadInvoicePdf(inv, biller) {
     let y = 48;
     const isMultiMonth = periodLabel(inv).includes("–");
 
+    const { logoUrl, logoAspect } = await loadLogo(biller);
     const logoWidth = 70;
-    const logoHeight = logoWidth * (249 / 500);
-    doc.addImage(LOGO_DATA_URL, "PNG", pageWidth - 20 - logoWidth, 14, logoWidth, logoHeight);
+    const logoHeight = logoWidth * logoAspect;
+    doc.addImage(logoUrl, "PNG", pageWidth - 20 - logoWidth, 14, logoWidth, logoHeight);
 
     doc.setFont("helvetica", "normal"); doc.setFontSize(12);
     doc.text("Hallöchen,", 20, y); y += 12;
@@ -1358,9 +1429,119 @@ function downloadInvoicePdf(inv, biller) {
     doc.text("Viele Grüße und ein Dankeschön", 20, y); y += 14;
     if (biller?.name) doc.text(biller.name, 20, y);
 
-    const toM = inv.to_month_idx ?? inv.month_idx;
-    const toY = inv.to_year ?? inv.year;
-    const suffix = (toY === inv.year && toM === inv.month_idx) ? `${MONTHS[inv.month_idx]}_${inv.year}` : `${MONTHS[inv.month_idx]}${inv.year}-${MONTHS[toM]}${toY}`;
-    doc.save(`Rechnung_${(inv.group_name || "").replace(/\s+/g, "_")}_${suffix}.pdf`);
+    doc.save(`Rechnung_${(inv.group_name || "").replace(/\s+/g, "_")}_${invoiceFilenameSuffix(inv)}.pdf`);
+  });
+}
+
+function invoiceFilenameSuffix(inv) {
+  const toM = inv.to_month_idx ?? inv.month_idx;
+  const toY = inv.to_year ?? inv.year;
+  return (toY === inv.year && toM === inv.month_idx) ? `${MONTHS[inv.month_idx]}_${inv.year}` : `${MONTHS[inv.month_idx]}${inv.year}-${MONTHS[toM]}${toY}`;
+}
+
+function downloadInvoicePdfTable(inv, biller) {
+  import("jspdf").then(async ({ jsPDF }) => {
+    const doc = new jsPDF({ unit: "mm", format: "a4" });
+    const pageWidth = 210;
+    const left = 20, right = 190;
+    const dates = inv.dates || [];
+
+    const { logoUrl, logoAspect } = await loadLogo(biller);
+    const logoWidth = 32;
+    const logoHeight = logoWidth * logoAspect;
+    doc.addImage(logoUrl, "PNG", right - logoWidth, 14, logoWidth, logoHeight);
+
+    doc.setFont("helvetica", "normal"); doc.setFontSize(11);
+    doc.text(`Gruppe: ${inv.group_name}`, left, 20);
+    doc.text(new Date(inv.generated_at || Date.now()).toLocaleDateString("de-DE"), right, 20, { align: "right" });
+
+    doc.setFont("helvetica", "bold"); doc.setFontSize(16);
+    const title = `Tennis Training ${periodLabel(inv)}`;
+    const titleWidth = doc.getTextWidth(title);
+    const titleX = (pageWidth - titleWidth) / 2;
+    doc.text(title, titleX, 42);
+    doc.setLineWidth(0.4);
+    doc.line(titleX, 44, titleX + titleWidth, 44);
+
+    let y = 58;
+    doc.setFont("helvetica", "normal"); doc.setFontSize(12);
+    doc.text("Hallo liebe Eltern,", left, y); y += 9;
+    doc.text(`hier sind die Kosten für das Training im ${periodLabel(inv)} aufgelistet:`, left, y, { maxWidth: 170 }); y += 12;
+
+    if ((inv.injury_notes || []).length > 0) {
+      inv.injury_notes.forEach((line) => {
+        doc.setFontSize(10);
+        doc.text(line, left, y, { maxWidth: 170 });
+        y += 8;
+      });
+      doc.setFontSize(12);
+      y += 2;
+    }
+
+    // Tabelle: Termine | Teilnehmer | Kosten
+    const colX = [left, left + 45, left + 120];
+    const colW = [45, 75, right - (left + 120)];
+    const rowStartY = y;
+    const headerH = 10;
+
+    doc.setFillColor(168, 208, 141); // grün wie in der Vorlage
+    doc.rect(left, y, right - left, headerH, "F");
+    doc.setFont("helvetica", "bold"); doc.setFontSize(11);
+    doc.text("Termine:", colX[0] + 2, y + 6.5);
+    doc.text("Teilnehmer:", colX[1] + 2, y + 6.5);
+    doc.text("Kosten:", colX[2] + 2, y + 6.5);
+    y += headerH;
+
+    doc.setFont("helvetica", "normal"); doc.setFontSize(10);
+    dates.forEach((d, idx) => {
+      const participants = d.participants || [];
+      const names = participants.length > 0 ? participants.map((p) => p.name) : ["—"];
+      const dateTotal = participants.reduce((sum, p) => sum + p.amount, 0);
+      const rowH = Math.max(9, names.length * 5.5 + 3);
+
+      if (idx % 2 === 1) {
+        doc.setFillColor(230, 236, 245);
+        doc.rect(left, y, right - left, rowH, "F");
+      }
+      doc.setFont("helvetica", "bold");
+      let dateText = dateLabel(d.dateIso);
+      const suffix = dateSuffix(d);
+      doc.text(dateText, colX[0] + 2, y + 6);
+      doc.setFont("helvetica", "normal");
+      if (suffix) {
+        doc.setFontSize(8);
+        doc.text(suffix.trim(), colX[0] + 2, y + 6 + 4, { maxWidth: colW[0] - 4 });
+        doc.setFontSize(10);
+      }
+      names.forEach((n, i) => doc.text(n, colX[1] + 2, y + 6 + i * 5.5));
+      doc.text(fmtEUR(dateTotal), colX[2] + 2, y + 6);
+      y += rowH;
+    });
+
+    // Gesamt-Zeile
+    const totalRowH = 12;
+    doc.setFillColor(154, 199, 120);
+    doc.rect(left, y, right - left, totalRowH, "F");
+    doc.setFont("helvetica", "bold"); doc.setFontSize(12);
+    doc.text(fmtEUR(inv.total), colX[2] + 2, y + 8);
+    y += totalRowH;
+
+    doc.setDrawColor(120);
+    doc.rect(left, rowStartY, right - left, y - rowStartY);
+    y += 14;
+
+    doc.setFont("helvetica", "normal"); doc.setFontSize(12);
+    const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((biller?.paymentInfo || "").trim());
+    const payLine = biller?.paymentInfo
+      ? (isEmail
+          ? `Bitte bringt das Geld bei der nächsten Trainingseinheit passend mit, oder sendet es per PayPal an: ${biller.paymentInfo} :)`
+          : `Bitte bringt das Geld bei der nächsten Trainingseinheit passend mit, oder überweist es an: ${biller.paymentInfo} :)`)
+      : "Bitte bringt das Geld bei der nächsten Trainingseinheit passend mit :)";
+    doc.text(payLine, left, y, { maxWidth: 170 }); y += 16;
+
+    doc.text("Viele Grüße", left, y); y += 9;
+    if (biller?.name) doc.text(biller.name, left, y);
+
+    doc.save(`Rechnung_${(inv.group_name || "").replace(/\s+/g, "_")}_${invoiceFilenameSuffix(inv)}.pdf`);
   });
 }
