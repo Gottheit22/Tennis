@@ -232,7 +232,7 @@ function Dashboard({ session, profile, allProfiles }) {
     const student = data && data[0];
     if (!student) return;
     if (groupIds.length > 0) {
-      await supabase.from("student_groups").insert(groupIds.map((gid) => ({ student_id: student.id, group_id: gid, owner_id: writeOwnerId })));
+      await supabase.from("student_groups").upsert(groupIds.map((gid) => ({ student_id: student.id, group_id: gid, owner_id: writeOwnerId })), { onConflict: "student_id,group_id", ignoreDuplicates: true });
     }
     setStudents((prev) => [...prev, { ...student, group_ids: groupIds, injuries: [] }].sort((x, y) => x.name.localeCompare(y.name)));
   };
@@ -244,7 +244,7 @@ function Dashboard({ session, profile, allProfiles }) {
     const { data } = await supabase.from("students").update({ name, is_schoolchild }).eq("id", id).select().maybeSingle();
     await supabase.from("student_groups").delete().eq("student_id", id);
     if (groupIds.length > 0) {
-      await supabase.from("student_groups").insert(groupIds.map((gid) => ({ student_id: id, group_id: gid, owner_id: writeOwnerId })));
+      await supabase.from("student_groups").upsert(groupIds.map((gid) => ({ student_id: id, group_id: gid, owner_id: writeOwnerId })), { onConflict: "student_id,group_id", ignoreDuplicates: true });
     }
     setStudents((prev) => prev.map((s) => (s.id === id ? { ...s, ...(data || { name, is_schoolchild }), group_ids: groupIds } : s)).sort((x, y) => x.name.localeCompare(y.name)));
   };
@@ -316,9 +316,12 @@ function Dashboard({ session, profile, allProfiles }) {
   // ---- Rechnung ----
   const saveBiller = async (name, address, paymentInfo, logoDataUrl) => {
     setBiller((prev) => ({ ...prev, name, address, paymentInfo, ...(logoDataUrl !== undefined ? { logoDataUrl } : {}) }));
-    const payload = { owner_id: writeOwnerId, name, address, payment_info: paymentInfo };
-    if (logoDataUrl !== undefined) payload.logo_data_url = logoDataUrl;
-    await supabase.from("biller").upsert(payload, { onConflict: "owner_id" });
+    const fields = { name, address, payment_info: paymentInfo };
+    if (logoDataUrl !== undefined) fields.logo_data_url = logoDataUrl;
+    const { data: updated, error: updateError } = await supabase.from("biller").update(fields).eq("owner_id", writeOwnerId).select();
+    if (!updateError && (!updated || updated.length === 0)) {
+      await supabase.from("biller").insert({ owner_id: writeOwnerId, ...fields });
+    }
   };
 
   const generateInvoice = async (groupId, fromYear, fromMonthIdx, toYear, toMonthIdx) => {
