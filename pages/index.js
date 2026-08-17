@@ -11,11 +11,11 @@ const DEFAULT_LAYOUT = "letter"; // "letter" (Brief-Format) oder "table" (Tabell
 // Fest im Code hinterlegte, nicht veränderbare Einstellungen pro Nutzer (Coach).
 // Schlüssel = Supabase-Nutzer-ID (Authentication → Users → UID).
 const OWNER_SETTINGS = {
-  "92dbf063-ac9f-4e3b-854a-e67763d76234": { hourlyRate: 36, layout: "letter", logo: LOGO_DATA_URL }, // du (r.mischler22)
-  "f923a209-ae8b-4e8d-a24c-05c709ea0724": { hourlyRate: 30, layout: "table", logo: JULIAN_LOGO_DATA_URL }, // Julian
+  "92dbf063-ac9f-4e3b-854a-e67763d76234": { hourlyRate: 36, layout: "letter", logo: LOGO_DATA_URL, logoAspect: 233 / 700 }, // du (r.mischler22)
+  "f923a209-ae8b-4e8d-a24c-05c709ea0724": { hourlyRate: 30, layout: "table", logo: JULIAN_LOGO_DATA_URL, logoAspect: 466 / 700 }, // Julian
 };
 function ownerSettings(ownerId) {
-  return OWNER_SETTINGS[ownerId] || { hourlyRate: HOURLY_RATE, layout: DEFAULT_LAYOUT, logo: LOGO_DATA_URL };
+  return OWNER_SETTINGS[ownerId] || { hourlyRate: HOURLY_RATE, layout: DEFAULT_LAYOUT, logo: LOGO_DATA_URL, logoAspect: 249 / 500 };
 }
 
 const fmtEUR = (n) => (n || 0).toLocaleString("de-DE", { style: "currency", currency: "EUR" });
@@ -1306,25 +1306,22 @@ function OpenPaymentsTab({ invoices, onTogglePaid }) {
 
 }
 
-async function loadLogo(ownerId) {
-  const logoUrl = ownerSettings(ownerId).logo || LOGO_DATA_URL;
-  const logoAspect = await new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => resolve(img.height / img.width);
-    img.onerror = () => resolve(249 / 500);
-    img.src = logoUrl;
-  });
-  return { logoUrl, logoAspect };
+function loadLogo(ownerId) {
+  const settings = ownerSettings(ownerId);
+  return { logoUrl: settings.logo || LOGO_DATA_URL, logoAspect: settings.logoAspect || 249 / 500 };
 }
 
 function downloadInvoicePdf(inv, biller) {
   const layout = ownerSettings(inv.owner_id).layout;
-  if (layout === "table") return downloadInvoicePdfTable(inv, biller);
-  return downloadInvoicePdfLetter(inv, biller);
+  const run = layout === "table" ? downloadInvoicePdfTable : downloadInvoicePdfLetter;
+  run(inv, biller).catch((err) => {
+    console.error("PDF-Erstellung fehlgeschlagen:", err);
+    alert("Die PDF konnte nicht erstellt werden. Bitte Konsole (F12) prüfen oder erneut versuchen.");
+  });
 }
 
 function downloadInvoicePdfLetter(inv, biller) {
-  import("jspdf").then(async ({ jsPDF }) => {
+  return import("jspdf").then(async ({ jsPDF }) => {
     const doc = new jsPDF({ unit: "mm", format: "a4" });
     const pageWidth = 210;
     const center = pageWidth / 2;
@@ -1332,7 +1329,7 @@ function downloadInvoicePdfLetter(inv, biller) {
     let y = 48;
     const isMultiMonth = periodLabel(inv).includes("–");
 
-    const { logoUrl, logoAspect } = await loadLogo(inv.owner_id);
+    const { logoUrl, logoAspect } = loadLogo(inv.owner_id);
     const logoWidth = 70;
     const logoHeight = logoWidth * logoAspect;
     doc.addImage(logoUrl, "PNG", pageWidth - 20 - logoWidth, 14, logoWidth, logoHeight);
@@ -1405,13 +1402,13 @@ function invoiceFilenameSuffix(inv) {
 }
 
 function downloadInvoicePdfTable(inv, biller) {
-  import("jspdf").then(async ({ jsPDF }) => {
+  return import("jspdf").then(async ({ jsPDF }) => {
     const doc = new jsPDF({ unit: "mm", format: "a4" });
     const pageWidth = 210;
     const left = 20, right = 190;
     const dates = inv.dates || [];
 
-    const { logoUrl, logoAspect } = await loadLogo(inv.owner_id);
+    const { logoUrl, logoAspect } = loadLogo(inv.owner_id);
     const logoWidth = 55;
     const logoHeight = logoWidth * logoAspect;
     doc.addImage(logoUrl, "PNG", right - logoWidth, 12, logoWidth, logoHeight);
