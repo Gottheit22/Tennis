@@ -726,9 +726,9 @@ function StudentsTab({ students, groups, onAdd, onDelete, onUpdate, onStartInjur
                 </div>
               </div>
               <div className="gap2">
-                <button className="icon-btn" style={{ color: openInjury ? "var(--paid-green)" : "var(--clay)", fontSize: 11, whiteSpace: "nowrap" }}
+                <button className="icon-btn" title={openInjury ? "Genesen melden" : "Verletzt melden"} style={{ color: openInjury ? "var(--paid-green)" : "var(--clay)", fontSize: 18 }}
                   onClick={() => { setInjuryEditId(editingInjury ? null : s.id); setInjuryDate(today); setEditingId(null); }}>
-                  {openInjury ? "genesen melden" : "verletzt melden"}
+                  {openInjury ? "💚" : "🤕"}
                 </button>
                 <button className="icon-btn" style={{ color: "var(--chalk-dim)" }} onClick={() => setEditingId(s.id)}>✎</button>
                 <button className="icon-btn" onClick={() => onDelete(s.id)}>✕</button>
@@ -1461,9 +1461,8 @@ function downloadInvoicePdfTable(inv, biller) {
     doc.setFont("helvetica", "normal"); doc.setFontSize(10);
     dates.forEach((d, idx) => {
       const participants = d.participants || [];
-      const names = participants.length > 0 ? participants.map((p) => p.name) : ["—"];
-      const dateTotal = participants.reduce((sum, p) => sum + p.amount, 0);
-      const rowH = Math.max(9, names.length * 5.5 + 3);
+      const rows = participants.length > 0 ? participants : [{ name: "—", amount: null }];
+      const rowH = Math.max(9, rows.length * 5.5 + 3);
 
       if (idx % 2 === 1) {
         doc.setFillColor(253, 226, 205);
@@ -1479,8 +1478,10 @@ function downloadInvoicePdfTable(inv, biller) {
         doc.text(suffix.trim(), colX[0] + 2, y + 6 + 4, { maxWidth: colW[0] - 4 });
         doc.setFontSize(10);
       }
-      names.forEach((n, i) => doc.text(n, colX[1] + 2, y + 6 + i * 5.5));
-      doc.text(fmtEUR(dateTotal), colX[2] + 2, y + 6);
+      rows.forEach((p, i) => {
+        doc.text(p.name, colX[1] + 2, y + 6 + i * 5.5);
+        doc.text(p.amount != null ? fmtEUR(p.amount) : "—", colX[2] + 2, y + 6 + i * 5.5);
+      });
       y += rowH;
     });
 
