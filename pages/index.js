@@ -1466,17 +1466,26 @@ function downloadInvoicePdfTable(inv, biller) {
     y += headerH;
 
     doc.setFont("helvetica", "normal"); doc.setFontSize(10);
-    dates.forEach((d, idx) => {
+
+    // Erst für jeden Termin ermitteln, wie viel Höhe er braucht (Teilnehmer + Hinweistext),
+    // dann die größte davon einheitlich für ALLE Zeilen verwenden — sonst wirken die Zeilen
+    // uneinheitlich groß, je nachdem wie viel Inhalt gerade in einer Zeile steckt.
+    const rowsPerDate = dates.map((d) => {
       const participants = d.participants || [];
       const rows = participants.length > 0 ? participants : [{ name: "—", amount: null }];
       const suffix = dateSuffixNoNames(d).trim();
-      // Zeilenhöhe muss auch den (ggf. mehrzeiligen) Hinweistext unter dem Datum berücksichtigen.
       doc.setFontSize(8);
       const suffixLines = suffix ? doc.splitTextToSize(suffix, colW[0] - 4) : [];
       doc.setFontSize(10);
       const namesHeight = rows.length * 5.5 + 3;
       const dateColHeight = 6 + (suffixLines.length ? 4 + suffixLines.length * 3.2 : 0) + 2;
-      const rowH = Math.max(9, namesHeight, dateColHeight);
+      return { rows, suffixLines, rowH: Math.max(9, namesHeight, dateColHeight) };
+    });
+    const uniformRowH = Math.max(9, ...rowsPerDate.map((r) => r.rowH));
+
+    dates.forEach((d, idx) => {
+      const { rows, suffixLines } = rowsPerDate[idx];
+      const rowH = uniformRowH;
 
       if (idx % 2 === 1) {
         doc.setFillColor(232, 250, 213);
