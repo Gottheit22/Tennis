@@ -406,11 +406,13 @@ function Dashboard({ session, profile, allProfiles }) {
         sessionStudents.forEach((s) => { charges[s.id].push(flatShare); sessionParticipants.push({ name: s.name, amount: flatShare }); });
       }
       heldCount++;
+      let durationNote = "";
       if (entry.duration && entry.duration !== group.duration) {
-        note = note ? `${note}; ${entry.duration} Min` : `${entry.duration} Min`;
+        durationNote = `${entry.duration} Min`;
+        note = note ? `${note}; ${durationNote}` : durationNote;
       }
       const [ey, em] = effectiveIso.split("-").map(Number);
-      dateEntries.push({ dateIso: effectiveIso, holiday, note, monthIdx: em - 1, year: ey, movedFromIso: entry.moved_to ? originalDateIso : null, participants: sessionParticipants });
+      dateEntries.push({ dateIso: effectiveIso, holiday, note, durationNote, monthIdx: em - 1, year: ey, movedFromIso: entry.moved_to ? originalDateIso : null, participants: sessionParticipants });
     });
     dateEntries.sort((a, b) => a.dateIso.localeCompare(b.dateIso));
 
@@ -1125,6 +1127,15 @@ function dateSuffix(d) {
   return parts.length ? ` (${parts.join("; ")})` : "";
 }
 
+// Wie dateSuffix, aber ohne Teilnehmernamen — für Layouts, in denen die Namen
+// bereits in einer eigenen Spalte stehen (z. B. Tabellen-Format).
+function dateSuffixNoNames(d) {
+  const parts = [];
+  if (d.durationNote) parts.push(d.durationNote);
+  if (d.movedFromIso) parts.push(`ursprünglich am: ${dateLabel(d.movedFromIso)}.`);
+  return parts.length ? ` (${parts.join("; ")})` : "";
+}
+
 function InvoiceView({ invoice, biller, onTogglePaid, onDelete }) {
   const dates = invoice.dates || [];
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -1458,7 +1469,7 @@ function downloadInvoicePdfTable(inv, biller) {
     dates.forEach((d, idx) => {
       const participants = d.participants || [];
       const rows = participants.length > 0 ? participants : [{ name: "—", amount: null }];
-      const suffix = dateSuffix(d).trim();
+      const suffix = dateSuffixNoNames(d).trim();
       // Zeilenhöhe muss auch den (ggf. mehrzeiligen) Hinweistext unter dem Datum berücksichtigen.
       doc.setFontSize(8);
       const suffixLines = suffix ? doc.splitTextToSize(suffix, colW[0] - 4) : [];
