@@ -1445,14 +1445,13 @@ function downloadInvoicePdfTable(inv, biller) {
     const rowStartY = y;
     const headerH = 10;
 
-    doc.setFillColor(247, 131, 41); // Orange wie im Logo
+    doc.setFillColor(146, 247, 38); // Grün wie im Logo
     doc.rect(left, y, right - left, headerH, "F");
     doc.setFont("helvetica", "bold"); doc.setFontSize(11);
-    doc.setTextColor(255, 255, 255);
+    doc.setTextColor(0, 0, 0);
     doc.text("Termine:", colX[0] + 2, y + 6.5);
     doc.text("Teilnehmer:", colX[1] + 2, y + 6.5);
     doc.text("Kosten:", colX[2] + 2, y + 6.5);
-    doc.setTextColor(0, 0, 0);
     y += headerH;
 
     doc.setFont("helvetica", "normal"); doc.setFontSize(10);
@@ -1469,7 +1468,7 @@ function downloadInvoicePdfTable(inv, biller) {
       const rowH = Math.max(9, namesHeight, dateColHeight);
 
       if (idx % 2 === 1) {
-        doc.setFillColor(253, 226, 205);
+        doc.setFillColor(232, 250, 213);
         doc.rect(left, y, right - left, rowH, "F");
       }
       doc.setFont("helvetica", "bold");
@@ -1489,12 +1488,11 @@ function downloadInvoicePdfTable(inv, biller) {
 
     // Gesamt-Zeile
     const totalRowH = 12;
-    doc.setFillColor(216, 100, 30);
+    doc.setFillColor(120, 199, 30);
     doc.rect(left, y, right - left, totalRowH, "F");
     doc.setFont("helvetica", "bold"); doc.setFontSize(12);
-    doc.setTextColor(255, 255, 255);
-    doc.text(fmtEUR(inv.total), colX[2] + 2, y + 8);
     doc.setTextColor(0, 0, 0);
+    doc.text(fmtEUR(inv.total), colX[2] + 2, y + 8);
     y += totalRowH;
 
     doc.setDrawColor(120);
