@@ -1507,13 +1507,29 @@ function downloadInvoicePdfTable(inv, biller) {
       y += rowH;
     });
 
-    // Gesamt-Zeile
-    const totalRowH = 12;
+    // Fußzeile: pro Schüler die Gesamtsumme für den Zeitraum, plus Gesamtbetrag unten
+    const students = inv.students || [];
+    const lineH = 7;
+    const totalRowH = students.length * lineH + 6 + 10;
     doc.setFillColor(15, 75, 17);
     doc.rect(left, y, right - left, totalRowH, "F");
-    doc.setFont("helvetica", "bold"); doc.setFontSize(12);
     doc.setTextColor(255, 255, 255);
-    doc.text(fmtEUR(inv.total), colX[2] + 2, y + 8);
+
+    doc.setFont("helvetica", "normal"); doc.setFontSize(11);
+    let sy = y + 8;
+    students.forEach((s) => {
+      doc.text(s.name, colX[1] + 2, sy);
+      doc.text(fmtEUR(s.total), colX[2] + 2, sy);
+      sy += lineH;
+    });
+
+    sy += 2;
+    doc.setDrawColor(255, 255, 255);
+    doc.setLineWidth(0.3);
+    doc.line(left + 4, sy - 5, right - 4, sy - 5);
+    doc.setFont("helvetica", "bold"); doc.setFontSize(12);
+    doc.text("Gesamt:", colX[1] + 2, sy);
+    doc.text(fmtEUR(inv.total), colX[2] + 2, sy);
     y += totalRowH;
 
     doc.setDrawColor(120);
