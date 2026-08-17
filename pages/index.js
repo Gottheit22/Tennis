@@ -1456,10 +1456,10 @@ function downloadInvoicePdfTable(inv, biller) {
     const rowStartY = y;
     const headerH = 10;
 
-    doc.setFillColor(120, 199, 30); // Grün wie in der Gesamt-Zeile
+    doc.setFillColor(15, 75, 17); // Grün wie im Logo
     doc.rect(left, y, right - left, headerH, "F");
     doc.setFont("helvetica", "bold"); doc.setFontSize(11);
-    doc.setTextColor(0, 0, 0);
+    doc.setTextColor(255, 255, 255);
     doc.text("Termine:", colX[0] + 2, y + 6.5);
     doc.text("Teilnehmer:", colX[1] + 2, y + 6.5);
     doc.text("Kosten:", colX[2] + 2, y + 6.5);
@@ -1499,15 +1499,16 @@ function downloadInvoicePdfTable(inv, biller) {
 
     // Gesamt-Zeile
     const totalRowH = 12;
-    doc.setFillColor(120, 199, 30);
+    doc.setFillColor(15, 75, 17);
     doc.rect(left, y, right - left, totalRowH, "F");
     doc.setFont("helvetica", "bold"); doc.setFontSize(12);
-    doc.setTextColor(0, 0, 0);
+    doc.setTextColor(255, 255, 255);
     doc.text(fmtEUR(inv.total), colX[2] + 2, y + 8);
     y += totalRowH;
 
     doc.setDrawColor(120);
     doc.rect(left, rowStartY, right - left, y - rowStartY);
+    doc.setTextColor(0, 0, 0);
     y += 14;
 
     doc.setFont("helvetica", "normal"); doc.setFontSize(12);
