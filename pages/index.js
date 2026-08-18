@@ -84,14 +84,27 @@ function datesForMonth(year, monthIdx, weekday) {
 
 // Trainingstermine einer Gruppe in einem bestimmten Monat: bei wöchentlichen Gruppen
 // alle passenden Wochentage, bei einmaligen Trainings (Schnuppertraining) nur der eine
-// festgelegte Termin, sofern er in den abgefragten Monat fällt.
+// festgelegte Termin, sofern er in den abgefragten Monat fällt. Zusätzlich werden frei
+// hinzugefügte Extra-Termine (z. B. ein weiteres Einzeltraining an einem anderen Tag)
+// ergänzt, sofern sie in den abgefragten Monat fallen.
 function sessionDates(group, year, monthIdx) {
+  const base = [];
   if (group.one_off_date) {
     const [y, m, day] = group.one_off_date.split("-").map(Number);
-    if (y === year && m - 1 === monthIdx) return [new Date(year, monthIdx, day)];
-    return [];
+    if (y === year && m - 1 === monthIdx) base.push(new Date(year, monthIdx, day));
+  } else {
+    base.push(...datesForMonth(year, monthIdx, group.weekday));
   }
-  return datesForMonth(year, monthIdx, group.weekday);
+  const seen = new Set(base.map((d) => isoDate(d)));
+  (group.extra_dates || []).forEach((dateIso) => {
+    const [y, m, day] = dateIso.split("-").map(Number);
+    if (y === year && m - 1 === monthIdx && !seen.has(dateIso)) {
+      base.push(new Date(year, monthIdx, day));
+      seen.add(dateIso);
+    }
+  });
+  base.sort((a, b) => a - b);
+  return base;
 }
 
 export default function App() {
@@ -271,6 +284,20 @@ function Dashboard({ session, profile, allProfiles }) {
   const delGroup = async (id) => {
     await supabase.from("groups").delete().eq("id", id);
     setGroups((prev) => prev.filter((g) => g.id !== id));
+  };
+  const addExtraDate = async (groupId, dateIso) => {
+    const group = groups.find((g) => g.id === groupId);
+    if (!group || !dateIso) return;
+    const extraDates = [...new Set([...(group.extra_dates || []), dateIso])].sort();
+    const { data } = await supabase.from("groups").update({ extra_dates: extraDates }).eq("id", groupId).select().maybeSingle();
+    setGroups((prev) => prev.map((g) => (g.id === groupId ? { ...g, ...(data || { extra_dates: extraDates }) } : g)));
+  };
+  const removeExtraDate = async (groupId, dateIso) => {
+    const group = groups.find((g) => g.id === groupId);
+    if (!group) return;
+    const extraDates = (group.extra_dates || []).filter((d) => d !== dateIso);
+    const { data } = await supabase.from("groups").update({ extra_dates: extraDates }).eq("id", groupId).select().maybeSingle();
+    setGroups((prev) => prev.map((g) => (g.id === groupId ? { ...g, ...(data || { extra_dates: extraDates }) } : g)));
   };
 
   // ---- Training / Anwesenheit ----
@@ -504,7 +531,7 @@ function Dashboard({ session, profile, allProfiles }) {
         <StudentsTab students={students} groups={groups} onAdd={addStudent} onDelete={delStudent} onUpdate={updateStudent} onStartInjury={startInjury} onEndInjury={endInjury} onRemoveInjury={removeInjury} onAddGroup={addGroup} />
       )}
       {tab === "gruppen" && (
-        <GroupsTab groups={groups} students={students} onAdd={addGroup} onDelete={delGroup} />
+        <GroupsTab groups={groups} students={students} onAdd={addGroup} onDelete={delGroup} onAddExtraDate={addExtraDate} onRemoveExtraDate={removeExtraDate} />
       )}
       {tab === "rechnungen" && (
         <InvoicesTab
@@ -773,7 +800,7 @@ function EditStudentCard({ student, groups, onSave, onCancel, onAddGroup }) {
   );
 }
 
-function GroupsTab({ groups, students, onAdd, onDelete }) {
+function GroupsTab({ groups, students, onAdd, onDelete, onAddExtraDate, onRemoveExtraDate }) {
   const [name, setName] = useState("");
   const [weekday, setWeekday] = useState(0);
   const [time, setTime] = useState("16:00");
@@ -781,16 +808,18 @@ function GroupsTab({ groups, students, onAdd, onDelete }) {
   const [oneOff, setOneOff] = useState(false);
   const [oneOffDate, setOneOffDate] = useState("");
   const [expandedId, setExpandedId] = useState(null);
+  const [newExtraDate, setNewExtraDate] = useState("");
 
   const renderGroupCard = (g) => {
     const members = students.filter((s) => (s.group_ids || []).includes(g.id));
     const expanded = expandedId === g.id;
+    const extraDates = g.extra_dates || [];
     return (
       <div key={g.id} className="card" style={{ marginBottom: 8 }}>
-        <button className="row" style={{ width: "100%", background: "none", border: "none", cursor: "pointer", textAlign: "left" }} onClick={() => setExpandedId(expanded ? null : g.id)}>
+        <button className="row" style={{ width: "100%", background: "none", border: "none", cursor: "pointer", textAlign: "left" }} onClick={() => { setExpandedId(expanded ? null : g.id); setNewExtraDate(""); }}>
           <div>
             <div style={{ fontWeight: 500 }}>{g.name}</div>
-            <div className="tag">{g.one_off_date ? `Einmalig, ${dateLabel(g.one_off_date)}` : WEEKDAYS[g.weekday]} · {g.time} Uhr · {g.duration} Min · {members.length} Schüler</div>
+            <div className="tag">{g.one_off_date ? `Einmalig, ${dateLabel(g.one_off_date)}` : WEEKDAYS[g.weekday]} · {g.time} Uhr · {g.duration} Min · {members.length} Schüler{extraDates.length > 0 ? ` · ${extraDates.length} Extra-Termin${extraDates.length !== 1 ? "e" : ""}` : ""}</div>
           </div>
           <span className="tag">{expanded ? "▲" : "▼"}</span>
         </button>
@@ -802,7 +831,26 @@ function GroupsTab({ groups, students, onAdd, onDelete }) {
                 {members.map((m) => <div key={m.id} style={{ fontSize: 14 }}>• {m.name}</div>)}
               </div>
             )}
-            <button className="icon-btn" style={{ marginTop: 10 }} onClick={() => onDelete(g.id)}>✕ Gruppe löschen</button>
+            <div className="net-divider" style={{ margin: "10px 0" }} />
+            <div className="tag" style={{ marginBottom: 6 }}>Zusätzliche Termine (z. B. ein weiteres Einzeltraining an einem anderen Tag)</div>
+            {extraDates.length > 0 && (
+              <div className="col" style={{ gap: 6, marginBottom: 10 }}>
+                {extraDates.map((d) => (
+                  <div key={d} className="row">
+                    <span style={{ fontSize: 14 }}>{dateLabel(d)}</span>
+                    <button className="icon-btn" onClick={() => onRemoveExtraDate(g.id, d)}>✕</button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="gap2" style={{ marginBottom: 10 }}>
+              <input type="date" value={expandedId === g.id ? newExtraDate : ""} onChange={(e) => setNewExtraDate(e.target.value)} style={{ flex: 1 }} />
+              <button className="btn-primary" style={{ width: "auto", padding: "8px 14px" }} disabled={!newExtraDate}
+                onClick={() => { onAddExtraDate(g.id, newExtraDate); setNewExtraDate(""); }}>
+                + Termin
+              </button>
+            </div>
+            <button className="icon-btn" onClick={() => onDelete(g.id)}>✕ Gruppe löschen</button>
           </div>
         )}
       </div>
