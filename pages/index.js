@@ -285,12 +285,15 @@ function Dashboard({ session, profile, allProfiles }) {
     await supabase.from("groups").delete().eq("id", id);
     setGroups((prev) => prev.filter((g) => g.id !== id));
   };
-  const addExtraDate = async (groupId, dateIso) => {
+  const addExtraDate = async (groupId, dateIso, duration) => {
     const group = groups.find((g) => g.id === groupId);
     if (!group || !dateIso) return;
     const extraDates = [...new Set([...(group.extra_dates || []), dateIso])].sort();
     const { data } = await supabase.from("groups").update({ extra_dates: extraDates }).eq("id", groupId).select().maybeSingle();
     setGroups((prev) => prev.map((g) => (g.id === groupId ? { ...g, ...(data || { extra_dates: extraDates }) } : g)));
+    if (duration && Number(duration) !== group.duration) {
+      upsertAttendance(groupId, dateIso, { duration: Number(duration) });
+    }
   };
   const removeExtraDate = async (groupId, dateIso) => {
     const group = groups.find((g) => g.id === groupId);
@@ -474,6 +477,7 @@ function Dashboard({ session, profile, allProfiles }) {
       to_month_idx: toMonthIdx,
       held_count: heldCount,
       student_count: originalGroupSize,
+      is_individual: !!group.is_individual,
       injury_notes: injuryNotes,
       total,
       students: studentsOutWithPaid,
@@ -702,7 +706,16 @@ function StudentsTab({ students, groups, onAdd, onDelete, onUpdate, onStartInjur
         {groups.length === 0 ? <div className="tag" style={{ color: "var(--clay)" }}>Lege zuerst eine Gruppe an (Tab „Gruppen").</div> : (
           <GroupMultiSelect groups={groups} selected={groupIds} onToggle={toggleGroup} />
         )}
-        <QuickGroupCreate suggestedName={name ? `Einzel - ${name}` : ""} onAddGroup={onAddGroup} onCreated={(gid) => setGroupIds((prev) => [...prev, gid])} />
+        <QuickGroupCreate suggestedName={name ? `Einzel - ${name}` : ""} onAddGroup={onAddGroup}
+          onCreated={(gid) => {
+            const newGroupIds = [...groupIds, gid];
+            if (name.trim()) {
+              onAdd(name, newGroupIds, isSchoolchild);
+              setName(""); setGroupIds([]);
+            } else {
+              setGroupIds(newGroupIds);
+            }
+          }} />
         <label className="row" style={{ cursor: "pointer" }}>
           <span className="tag" style={{ fontSize: 13, textTransform: "none", letterSpacing: 0 }}>Geht noch zur Schule (betrifft Ferienregelung)</span>
           <input type="checkbox" style={{ width: "auto" }} checked={isSchoolchild} onChange={(e) => setIsSchoolchild(e.target.checked)} />
@@ -809,6 +822,7 @@ function GroupsTab({ groups, students, onAdd, onDelete, onAddExtraDate, onRemove
   const [oneOffDate, setOneOffDate] = useState("");
   const [expandedId, setExpandedId] = useState(null);
   const [newExtraDate, setNewExtraDate] = useState("");
+  const [newExtraDuration, setNewExtraDuration] = useState("");
 
   const renderGroupCard = (g) => {
     const members = students.filter((s) => (s.group_ids || []).includes(g.id));
@@ -816,7 +830,7 @@ function GroupsTab({ groups, students, onAdd, onDelete, onAddExtraDate, onRemove
     const extraDates = g.extra_dates || [];
     return (
       <div key={g.id} className="card" style={{ marginBottom: 8 }}>
-        <button className="row" style={{ width: "100%", background: "none", border: "none", cursor: "pointer", textAlign: "left" }} onClick={() => { setExpandedId(expanded ? null : g.id); setNewExtraDate(""); }}>
+        <button className="row" style={{ width: "100%", background: "none", border: "none", cursor: "pointer", textAlign: "left" }} onClick={() => { setExpandedId(expanded ? null : g.id); setNewExtraDate(""); setNewExtraDuration(String(g.duration)); }}>
           <div>
             <div style={{ fontWeight: 500 }}>{g.name}</div>
             <div className="tag">{g.one_off_date ? `Einmalig, ${dateLabel(g.one_off_date)}` : WEEKDAYS[g.weekday]} · {g.time} Uhr · {g.duration} Min · {members.length} Schüler{extraDates.length > 0 ? ` · ${extraDates.length} Extra-Termin${extraDates.length !== 1 ? "e" : ""}` : ""}</div>
@@ -843,10 +857,14 @@ function GroupsTab({ groups, students, onAdd, onDelete, onAddExtraDate, onRemove
                 ))}
               </div>
             )}
-            <div className="gap2" style={{ marginBottom: 10 }}>
-              <input type="date" value={expandedId === g.id ? newExtraDate : ""} onChange={(e) => setNewExtraDate(e.target.value)} style={{ flex: 1 }} />
-              <button className="btn-primary" style={{ width: "auto", padding: "8px 14px" }} disabled={!newExtraDate}
-                onClick={() => { onAddExtraDate(g.id, newExtraDate); setNewExtraDate(""); }}>
+            <div className="gap2" style={{ marginBottom: 6 }}>
+              <input type="date" value={expandedId === g.id ? newExtraDate : ""} onChange={(e) => setNewExtraDate(e.target.value)} style={{ flex: 2 }} />
+              <input type="number" min="15" step="15" placeholder="Min" value={expandedId === g.id ? newExtraDuration : ""} onChange={(e) => setNewExtraDuration(e.target.value)} style={{ flex: 1 }} />
+            </div>
+            <div className="gap2" style={{ marginBottom: 10, alignItems: "center" }}>
+              <span className="tag" style={{ whiteSpace: "nowrap" }}>Minuten Dauer (Standard: {g.duration})</span>
+              <button className="btn-primary" style={{ width: "auto", padding: "8px 14px", marginLeft: "auto" }} disabled={!newExtraDate}
+                onClick={() => { onAddExtraDate(g.id, newExtraDate, newExtraDuration); setNewExtraDate(""); setNewExtraDuration(String(g.duration)); }}>
                 + Termin
               </button>
             </div>
@@ -1484,7 +1502,8 @@ function downloadInvoicePdfLetter(inv, biller) {
     });
     doc.text("statt.", 20, y); y += 12;
 
-    doc.text(`Es handelt sich um eine ${inv.student_count ?? (inv.students || []).length}er Gruppe.`, 20, y); y += 12;
+    const groupSizeText = inv.is_individual ? "Es handelt sich um ein Einzeltraining." : `Es handelt sich um eine ${inv.student_count ?? (inv.students || []).length}er Gruppe.`;
+    doc.text(groupSizeText, 20, y); y += 12;
 
     if ((inv.injury_notes || []).length > 0) {
       inv.injury_notes.forEach((line) => {
