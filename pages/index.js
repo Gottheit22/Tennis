@@ -127,41 +127,28 @@ export default function App() {
 }
 
 function Login() {
-  const [mode, setMode] = useState("login"); // "login" | "signup"
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
-  const [info, setInfo] = useState("");
   const [loading, setLoading] = useState(false);
 
   const submit = async () => {
-    setError(""); setInfo(""); setLoading(true);
-    if (mode === "login") {
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) setError(error.message);
-    } else {
-      const { error } = await supabase.auth.signUp({ email, password });
-      if (error) setError(error.message);
-      else setInfo("Konto erstellt. Falls eine Bestätigungs-E-Mail nötig ist, prüfe dein Postfach — sonst kannst du dich jetzt direkt anmelden.");
-    }
+    setError(""); setLoading(true);
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) setError(error.message);
     setLoading(false);
   };
 
   return (
     <div className="wrap">
       <Header />
-      <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>{mode === "login" ? "Anmelden" : "Konto erstellen"}</div>
+      <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Anmelden</div>
       <div className="card col">
         <input placeholder="E-Mail" type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
-        <input placeholder="Passwort" type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+        <input placeholder="Passwort" type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") submit(); }} />
         {error && <div className="tag" style={{ color: "var(--clay)" }}>⚠ {error}</div>}
-        {info && <div className="tag" style={{ color: "var(--paid-green)" }}>{info}</div>}
         <button className="btn-primary" disabled={loading || !email || !password} onClick={submit}>
-          {mode === "login" ? "Anmelden" : "Konto erstellen"}
-        </button>
-        <button className="tag" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--chalk-dim)" }}
-          onClick={() => { setMode(mode === "login" ? "signup" : "login"); setError(""); setInfo(""); }}>
-          {mode === "login" ? "Noch kein Konto? Registrieren" : "Schon ein Konto? Anmelden"}
+          Anmelden
         </button>
       </div>
     </div>
@@ -272,9 +259,9 @@ function Dashboard({ session, profile, allProfiles }) {
   };
 
   // ---- Gruppen ----
-  const addGroup = async (name, weekday, time, duration, oneOffDate) => {
+  const addGroup = async (name, weekday, time, duration, oneOffDate, isIndividual) => {
     if (!name.trim()) return null;
-    const { data } = await supabase.from("groups").insert({ name: name.trim(), weekday: oneOffDate ? null : weekday, time, duration, one_off_date: oneOffDate || null, owner_id: writeOwnerId }).select();
+    const { data } = await supabase.from("groups").insert({ name: name.trim(), weekday: oneOffDate ? null : weekday, time, duration, one_off_date: oneOffDate || null, owner_id: writeOwnerId, is_individual: !!isIndividual }).select();
     if (data) {
       setGroups((prev) => [...prev, ...data].sort((x, y) => x.name.localeCompare(y.name)));
       return data[0];
@@ -621,7 +608,7 @@ function QuickGroupCreate({ suggestedName, onAddGroup, onCreated }) {
 
   const submit = async () => {
     if (!name.trim() || (oneOff && !oneOffDate)) return;
-    const created = await onAddGroup(name, weekday, time, duration, oneOff ? oneOffDate : null);
+    const created = await onAddGroup(name, weekday, time, duration, oneOff ? oneOffDate : null, true);
     if (created) {
       onCreated(created.id);
       setOpen(false);
@@ -794,11 +781,42 @@ function GroupsTab({ groups, students, onAdd, onDelete }) {
   const [oneOff, setOneOff] = useState(false);
   const [oneOffDate, setOneOffDate] = useState("");
   const [expandedId, setExpandedId] = useState(null);
+
+  const renderGroupCard = (g) => {
+    const members = students.filter((s) => (s.group_ids || []).includes(g.id));
+    const expanded = expandedId === g.id;
+    return (
+      <div key={g.id} className="card" style={{ marginBottom: 8 }}>
+        <button className="row" style={{ width: "100%", background: "none", border: "none", cursor: "pointer", textAlign: "left" }} onClick={() => setExpandedId(expanded ? null : g.id)}>
+          <div>
+            <div style={{ fontWeight: 500 }}>{g.name}</div>
+            <div className="tag">{g.one_off_date ? `Einmalig, ${dateLabel(g.one_off_date)}` : WEEKDAYS[g.weekday]} · {g.time} Uhr · {g.duration} Min · {members.length} Schüler</div>
+          </div>
+          <span className="tag">{expanded ? "▲" : "▼"}</span>
+        </button>
+        {expanded && (
+          <div style={{ marginTop: 10 }}>
+            <div className="net-divider" style={{ margin: "0 0 10px" }} />
+            {members.length === 0 ? <div className="tag">Keine Schüler in dieser Gruppe.</div> : (
+              <div className="col" style={{ gap: 4 }}>
+                {members.map((m) => <div key={m.id} style={{ fontSize: 14 }}>• {m.name}</div>)}
+              </div>
+            )}
+            <button className="icon-btn" style={{ marginTop: 10 }} onClick={() => onDelete(g.id)}>✕ Gruppe löschen</button>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const regularGroups = groups.filter((g) => !g.is_individual);
+  const individualGroups = groups.filter((g) => g.is_individual);
+
   return (
     <div>
       <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Gruppe anlegen</div>
       <div className="card col">
-        <input placeholder={oneOff ? "Bezeichnung (z. B. Schnuppertraining Familie Meyer)" : "Gruppenname (z. B. Kids Mittwoch)"} value={name} onChange={(e) => setName(e.target.value)} />
+        <input placeholder="Gruppenname (z. B. Kids Mittwoch)" value={name} onChange={(e) => setName(e.target.value)} />
         <label className="row" style={{ cursor: "pointer" }}>
           <span className="tag" style={{ fontSize: 13, textTransform: "none", letterSpacing: 0 }}>Einmaliges Training (z. B. Schnuppertraining)</span>
           <input type="checkbox" style={{ width: "auto" }} checked={oneOff} onChange={(e) => setOneOff(e.target.checked)} />
@@ -818,39 +836,61 @@ function GroupsTab({ groups, students, onAdd, onDelete }) {
           <span className="tag" style={{ whiteSpace: "nowrap" }}>Minuten Dauer</span>
         </div>
         <button className="btn-primary" disabled={oneOff && !oneOffDate}
-          onClick={() => { onAdd(name, weekday, time, duration, oneOff ? oneOffDate : null); setName(""); setOneOffDate(""); setOneOff(false); }}>
+          onClick={() => { onAdd(name, weekday, time, duration, oneOff ? oneOffDate : null, false); setName(""); setOneOffDate(""); setOneOff(false); }}>
           + {oneOff ? "Einmaliges Training" : "Gruppe"} anlegen
         </button>
+        <div className="tag">Für ein einzelnes Einzeltraining eines Schülers: im Tab „Schüler" direkt beim jeweiligen Schüler anlegen.</div>
       </div>
       <div className="net-divider" />
-      <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Alle Gruppen ({groups.length})</div>
-      {groups.length === 0 && <div className="empty">Noch keine Gruppen angelegt.</div>}
-      {groups.map((g) => {
-        const members = students.filter((s) => (s.group_ids || []).includes(g.id));
-        const expanded = expandedId === g.id;
-        return (
-          <div key={g.id} className="card" style={{ marginBottom: 8 }}>
-            <button className="row" style={{ width: "100%", background: "none", border: "none", cursor: "pointer", textAlign: "left" }} onClick={() => setExpandedId(expanded ? null : g.id)}>
-              <div>
-                <div style={{ fontWeight: 500 }}>{g.name}</div>
-                <div className="tag">{g.one_off_date ? `Einmalig, ${dateLabel(g.one_off_date)}` : WEEKDAYS[g.weekday]} · {g.time} Uhr · {g.duration} Min · {members.length} Schüler</div>
-              </div>
-              <span className="tag">{expanded ? "▲" : "▼"}</span>
-            </button>
-            {expanded && (
-              <div style={{ marginTop: 10 }}>
-                <div className="net-divider" style={{ margin: "0 0 10px" }} />
-                {members.length === 0 ? <div className="tag">Keine Schüler in dieser Gruppe.</div> : (
-                  <div className="col" style={{ gap: 4 }}>
-                    {members.map((m) => <div key={m.id} style={{ fontSize: 14 }}>• {m.name}</div>)}
-                  </div>
-                )}
-                <button className="icon-btn" style={{ marginTop: 10 }} onClick={() => onDelete(g.id)}>✕ Gruppe löschen</button>
-              </div>
-            )}
+      <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Gruppen ({regularGroups.length})</div>
+      {regularGroups.length === 0 && <div className="empty">Noch keine Gruppen angelegt.</div>}
+      {regularGroups.map(renderGroupCard)}
+
+      {individualGroups.length > 0 && (
+        <>
+          <div className="net-divider" />
+          <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Einzeltrainings ({individualGroups.length})</div>
+          {individualGroups.map(renderGroupCard)}
+        </>
+      )}
+    </div>
+  );
+}
+
+function MonthOverview({ groups, students, attendance, year, monthIdx, onSelectGroup }) {
+  const sessions = [];
+  groups.forEach((group) => {
+    sessionDates(group, year, monthIdx).forEach((d) => {
+      const dateIso = isoDate(d);
+      const entry = attendance[`${group.id}__${dateIso}`] || { cancelled: false, present: {}, moved_to: null };
+      const effectiveIso = entry.moved_to || dateIso;
+      const groupStudents = students.filter((s) => (s.group_ids || []).includes(group.id));
+      const presentCount = groupStudents.filter((s) => entry.present[s.id]).length;
+      sessions.push({ dateIso: effectiveIso, group, cancelled: entry.cancelled, presentCount, total: groupStudents.length, moved: !!entry.moved_to });
+    });
+  });
+  sessions.sort((a, b) => a.dateIso.localeCompare(b.dateIso));
+
+  if (sessions.length === 0) return <div className="empty">Keine Trainings in diesem Monat.</div>;
+
+  return (
+    <div className="col" style={{ gap: 8 }}>
+      {sessions.map((s, idx) => (
+        <button key={idx} className="card row" style={{ width: "100%", cursor: "pointer", opacity: s.cancelled ? 0.55 : 1 }}
+          onClick={() => onSelectGroup(s.group.id)}>
+          <div style={{ textAlign: "left" }}>
+            <div style={{ fontWeight: 500 }}>
+              {new Date(s.dateIso + "T00:00:00").toLocaleDateString("de-DE", { weekday: "short", day: "2-digit", month: "2-digit" })}
+              {" · "}{s.group.name}
+              {s.moved && <span className="tag" style={{ marginLeft: 6 }}>verschoben</span>}
+            </div>
+            <div className="tag">
+              {s.cancelled ? "Ausgefallen" : `${s.presentCount}/${s.total} anwesend markiert`}
+            </div>
           </div>
-        );
-      })}
+          <span className="tag">Bearbeiten →</span>
+        </button>
+      ))}
     </div>
   );
 }
@@ -860,11 +900,9 @@ function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, 
   const [moveValue, setMoveValue] = useState("");
   const [editingDuration, setEditingDuration] = useState(null);
   const [durationValue, setDurationValue] = useState("");
+  const [viewMode, setViewMode] = useState("group"); // "group" | "month"
 
   if (groups.length === 0) return <div className="empty">Lege zuerst eine Gruppe an (Tab „Gruppen").</div>;
-  const group = groups.find((g) => g.id === groupId) || groups[0];
-  const groupStudents = students.filter((s) => (s.group_ids || []).includes(group.id));
-  const dates = sessionDates(group, year, monthIdx);
 
   const shiftMonth = (delta) => {
     let m = monthIdx + delta, y = year;
@@ -872,17 +910,47 @@ function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, 
     setMonthIdx(m); setYear(y);
   };
 
+  const monthNav = (
+    <div className="row" style={{ marginBottom: 12 }}>
+      <button className="card" style={{ padding: "8px 12px", cursor: "pointer" }} onClick={() => shiftMonth(-1)}>‹</button>
+      <div className="disp">{MONTHS[monthIdx]} {year}</div>
+      <button className="card" style={{ padding: "8px 12px", cursor: "pointer" }} onClick={() => shiftMonth(1)}>›</button>
+    </div>
+  );
+
+  const viewToggle = (
+    <div className="gap2" style={{ marginBottom: 12 }}>
+      <button className={`pill ${viewMode === "group" ? "on" : ""}`} onClick={() => setViewMode("group")}>Nach Gruppe</button>
+      <button className={`pill ${viewMode === "month" ? "on" : ""}`} onClick={() => setViewMode("month")}>Ganzer Monat</button>
+    </div>
+  );
+
+  if (viewMode === "month") {
+    return (
+      <div>
+        <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Trainingserfassung</div>
+        {viewToggle}
+        {monthNav}
+        <MonthOverview
+          groups={groups} students={students} attendance={attendance} year={year} monthIdx={monthIdx}
+          onSelectGroup={(gid) => { setGroupId(gid); setViewMode("group"); }}
+        />
+      </div>
+    );
+  }
+
+  const group = groups.find((g) => g.id === groupId) || groups[0];
+  const groupStudents = students.filter((s) => (s.group_ids || []).includes(group.id));
+  const dates = sessionDates(group, year, monthIdx);
+
   return (
     <div>
       <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Trainingserfassung</div>
+      {viewToggle}
       <select value={group.id} onChange={(e) => setGroupId(e.target.value)} style={{ marginBottom: 12 }}>
         {groups.map((g) => <option key={g.id} value={g.id}>{groupLabel(g)}</option>)}
       </select>
-      <div className="row" style={{ marginBottom: 12 }}>
-        <button className="card" style={{ padding: "8px 12px", cursor: "pointer" }} onClick={() => shiftMonth(-1)}>‹</button>
-        <div className="disp">{MONTHS[monthIdx]} {year}</div>
-        <button className="card" style={{ padding: "8px 12px", cursor: "pointer" }} onClick={() => shiftMonth(1)}>›</button>
-      </div>
+      {monthNav}
       <div className="tag" style={{ marginBottom: 12 }}>
         {group.one_off_date ? `Einmaliges Training, ${dateLabel(group.one_off_date)}` : `${WEEKDAYS[group.weekday]}, ${group.time} Uhr`} · {group.duration} Min (Standard) · {groupStudents.length} Schüler
       </div>
