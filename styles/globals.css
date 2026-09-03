@@ -66,7 +66,7 @@ input:focus, select:focus { border-color: var(--ball); }
 .pill.on { border-color: var(--ball); background: rgba(215, 242, 44, 0.12); color: var(--ball); }
 .header { padding: 32px 0 16px; display: flex; align-items: center; gap: 12px; }
 .logo { width: 40px; height: 40px; border-radius: 999px; background: var(--ball); display: flex; align-items: center; justify-content: center; color: #12300f; font-weight: 700; }
-.nav { position: fixed; bottom: 0; left: 0; right: 0; background: var(--surface); border-top: 1px solid var(--line); }
+.nav { position: fixed; bottom: 0; left: 0; right: 0; background: var(--surface); border-top: 1px solid var(--line); padding-bottom: env(safe-area-inset-bottom); }
 .nav-inner { max-width: 440px; margin: 0 auto; display: flex; }
 .nav-btn { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 12px 0; background: none; border: none; border-top: 2px solid transparent; color: var(--chalk-dim); cursor: pointer; }
 .nav-btn.active { color: var(--ball); border-top-color: var(--ball); }
