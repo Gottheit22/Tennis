@@ -432,8 +432,8 @@ function Dashboard({ session, profile, allProfiles }) {
           const share = slotCost / attendingPayers.length;
           attendingPayers.forEach((s) => { addCharge(s, share); sessionParticipants.push({ name: s.name, amount: share }); });
         }
-        if (holidaySchoolchildCount > 0) {
-          note = attendingSchoolchildren.length > 0 ? attendingSchoolchildren.map((s) => s.name).join(", ") : "niemand von den Schulkindern";
+        if (holidaySchoolchildCount > 0 || extraStudents.length > 0) {
+          note = attendingPayers.length > 0 ? attendingPayers.map((s) => s.name).join(", ") : "niemand von den Schulkindern";
         }
       } else {
         // An regulären Terminen prüfen, wer an genau diesem Tag verletzt war, und
