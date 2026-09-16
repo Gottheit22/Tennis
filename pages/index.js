@@ -306,11 +306,11 @@ function Dashboard({ session, profile, allProfiles }) {
   // ---- Training / Anwesenheit ----
   const upsertAttendance = async (groupId, dateIso, patch) => {
     const key = `${groupId}__${dateIso}`;
-    const existing = attendance[key] || { cancelled: false, present: {}, moved_to: null, duration: null };
+    const existing = attendance[key] || { cancelled: false, present: {}, moved_to: null, duration: null, extra_participants: [] };
     const next = { ...existing, ...patch };
     const { data } = await supabase
       .from("attendance")
-      .upsert({ id: existing.id, group_id: groupId, date: dateIso, cancelled: next.cancelled, present: next.present, moved_to: next.moved_to || null, duration: next.duration || null, owner_id: writeOwnerId }, { onConflict: "group_id,date" })
+      .upsert({ id: existing.id, group_id: groupId, date: dateIso, cancelled: next.cancelled, present: next.present, moved_to: next.moved_to || null, duration: next.duration || null, extra_participants: next.extra_participants || [], owner_id: writeOwnerId }, { onConflict: "group_id,date" })
       .select()
       .maybeSingle();
     setAttendance((prev) => ({ ...prev, [key]: data || { ...next, group_id: groupId, date: dateIso } }));
@@ -329,6 +329,16 @@ function Dashboard({ session, profile, allProfiles }) {
   };
   const setTrainingDuration = (groupId, dateIso, minutes) => {
     upsertAttendance(groupId, dateIso, { duration: minutes || null });
+  };
+  const addExtraParticipant = (groupId, dateIso, studentId) => {
+    const entry = attendance[`${groupId}__${dateIso}`] || { cancelled: false, present: {}, extra_participants: [] };
+    const extra = [...new Set([...(entry.extra_participants || []), studentId])];
+    upsertAttendance(groupId, dateIso, { extra_participants: extra });
+  };
+  const removeExtraParticipant = (groupId, dateIso, studentId) => {
+    const entry = attendance[`${groupId}__${dateIso}`] || { cancelled: false, present: {}, extra_participants: [] };
+    const extra = (entry.extra_participants || []).filter((id) => id !== studentId);
+    upsertAttendance(groupId, dateIso, { extra_participants: extra });
   };
 
   // ---- Rechnung ----
@@ -362,8 +372,14 @@ function Dashboard({ session, profile, allProfiles }) {
       return `${y}-${m - 1}`;
     };
 
-    const charges = {};
-    groupStudents.forEach((s) => { charges[s.id] = []; });
+    const charges = {}; // id -> [amount, ...]
+    const chargeNames = {}; // id -> Name (auch für Gastspieler, die nicht fest in der Gruppe sind)
+    const addCharge = (student, amount) => {
+      if (!charges[student.id]) charges[student.id] = [];
+      charges[student.id].push(amount);
+      chargeNames[student.id] = student.name;
+    };
+    groupStudents.forEach((s) => { charges[s.id] = []; chargeNames[s.id] = s.name; });
     const dateEntries = [];
     let heldCount = 0;
     const injuredNamesAffected = new Set();
@@ -398,6 +414,10 @@ function Dashboard({ session, profile, allProfiles }) {
       const slotCost = ownerSettings(writeOwnerId).hourlyRate * (effectiveDuration / 60);
       let note = "";
       const sessionParticipants = []; // [{name, amount}] — für das Tabellen-Layout
+      // Gastspieler, die manuell nur für diesen einen Termin hinzugefügt wurden.
+      const extraStudents = (entry.extra_participants || [])
+        .map((id) => students.find((s) => s.id === id))
+        .filter(Boolean);
 
       if (holiday) {
         // An Ferienterminen spielt eine Verletzung keine Rolle: Schulkinder zahlen ohnehin
@@ -405,22 +425,24 @@ function Dashboard({ session, profile, allProfiles }) {
         // pauschal weiter — die Verletzung wird hier bewusst nicht berücksichtigt.
         const holidaySchoolchildCount = groupStudents.filter((s) => s.is_schoolchild).length;
         const flatShare = originalGroupSize > 0 ? slotCost / originalGroupSize : 0;
-        groupStudents.filter((s) => !s.is_schoolchild).forEach((s) => { charges[s.id].push(flatShare); sessionParticipants.push({ name: s.name, amount: flatShare }); });
+        groupStudents.filter((s) => !s.is_schoolchild).forEach((s) => { addCharge(s, flatShare); sessionParticipants.push({ name: s.name, amount: flatShare }); });
         const attendingSchoolchildren = groupStudents.filter((s) => s.is_schoolchild && entry.present[s.id]);
-        if (attendingSchoolchildren.length > 0) {
-          const share = slotCost / attendingSchoolchildren.length;
-          attendingSchoolchildren.forEach((s) => { charges[s.id].push(share); sessionParticipants.push({ name: s.name, amount: share }); });
+        const attendingPayers = [...attendingSchoolchildren, ...extraStudents];
+        if (attendingPayers.length > 0) {
+          const share = slotCost / attendingPayers.length;
+          attendingPayers.forEach((s) => { addCharge(s, share); sessionParticipants.push({ name: s.name, amount: share }); });
         }
         if (holidaySchoolchildCount > 0) {
           note = attendingSchoolchildren.length > 0 ? attendingSchoolchildren.map((s) => s.name).join(", ") : "niemand von den Schulkindern";
         }
       } else {
-        // An regulären Terminen prüfen, wer an genau diesem Tag verletzt war.
-        const sessionStudents = groupStudents.filter((s) => !isInjuredOn(s, effectiveIso));
+        // An regulären Terminen prüfen, wer an genau diesem Tag verletzt war, und
+        // Gastspieler für diesen Termin mit einbeziehen.
+        const sessionStudents = [...groupStudents.filter((s) => !isInjuredOn(s, effectiveIso)), ...extraStudents];
         groupStudents.filter((s) => isInjuredOn(s, effectiveIso)).forEach((s) => injuredNamesAffected.add(s.name));
         const sessionCount = sessionStudents.length;
         const flatShare = sessionCount > 0 ? slotCost / sessionCount : 0;
-        sessionStudents.forEach((s) => { charges[s.id].push(flatShare); sessionParticipants.push({ name: s.name, amount: flatShare }); });
+        sessionStudents.forEach((s) => { addCharge(s, flatShare); sessionParticipants.push({ name: s.name, amount: flatShare }); });
       }
       heldCount++;
       let durationNote = "";
@@ -433,8 +455,11 @@ function Dashboard({ session, profile, allProfiles }) {
     });
     dateEntries.sort((a, b) => a.dateIso.localeCompare(b.dateIso));
 
-    const studentsOut = groupStudents.map((s) => {
-      const amounts = charges[s.id];
+    // Feste Gruppenmitglieder zuerst, danach eventuelle Gastspieler mit Kosten.
+    const guestIds = Object.keys(charges).filter((id) => !groupStudents.some((s) => s.id === id));
+    const allIdsForOutput = [...groupStudents.map((s) => s.id), ...guestIds];
+    const studentsOut = allIdsForOutput.map((id) => {
+      const amounts = charges[id] || [];
       const total = amounts.reduce((sum, a) => sum + a, 0);
       const order = [];
       const counts = new Map();
@@ -448,7 +473,7 @@ function Dashboard({ session, profile, allProfiles }) {
         const count = counts.get(key);
         return count > 1 ? `${fmtEUR(amount)} × ${count}` : fmtEUR(amount);
       }).join(" + ");
-      return { id: s.id, name: s.name, total, formula: formula || fmtEUR(0), count: amounts.length };
+      return { id, name: chargeNames[id], total, formula: formula || fmtEUR(0), count: amounts.length };
     });
     const total = studentsOut.reduce((sum, s) => sum + s.total, 0);
     // Hinweiszeilen, falls während des Zeitraums jemand verletzt war und sich dadurch
@@ -528,7 +553,7 @@ function Dashboard({ session, profile, allProfiles }) {
           groupId={trainingGroupId} setGroupId={setTrainingGroupId}
           year={trainingYear} monthIdx={trainingMonth}
           setYear={setTrainingYear} setMonthIdx={setTrainingMonth}
-          onToggleCancel={toggleCancelled} onTogglePresent={togglePresent} onSetMovedDate={setMovedDate} onSetDuration={setTrainingDuration}
+          onToggleCancel={toggleCancelled} onTogglePresent={togglePresent} onSetMovedDate={setMovedDate} onSetDuration={setTrainingDuration} onAddExtraParticipant={addExtraParticipant} onRemoveExtraParticipant={removeExtraParticipant}
         />
       )}
       {tab === "schueler" && (
@@ -961,11 +986,13 @@ function MonthOverview({ groups, students, attendance, year, monthIdx, onSelectG
   );
 }
 
-function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, monthIdx, setYear, setMonthIdx, onToggleCancel, onTogglePresent, onSetMovedDate, onSetDuration }) {
+function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, monthIdx, setYear, setMonthIdx, onToggleCancel, onTogglePresent, onSetMovedDate, onSetDuration, onAddExtraParticipant, onRemoveExtraParticipant }) {
   const [movingDate, setMovingDate] = useState(null);
   const [moveValue, setMoveValue] = useState("");
   const [editingDuration, setEditingDuration] = useState(null);
   const [durationValue, setDurationValue] = useState("");
+  const [addingGuestDate, setAddingGuestDate] = useState(null);
+  const [guestStudentId, setGuestStudentId] = useState("");
   const [viewMode, setViewMode] = useState("group"); // "group" | "month"
 
   if (groups.length === 0) return <div className="empty">Lege zuerst eine Gruppe an (Tab „Gruppen").</div>;
@@ -1052,7 +1079,27 @@ function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, 
               <button className="tag" style={{ background: "none", border: "none", cursor: "pointer", color: entry.cancelled ? "var(--clay)" : "var(--chalk-dim)" }} onClick={() => onToggleCancel(group.id, dateIso)}>
                 {entry.cancelled ? "Ausgefallen ✕ (wieder aktivieren)" : "Als ausgefallen markieren"}
               </button>
+              {!entry.cancelled && (
+                <button className="tag" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--chalk-dim)" }}
+                  onClick={() => { setAddingGuestDate(addingGuestDate === dateIso ? null : dateIso); setGuestStudentId(""); setMovingDate(null); setEditingDuration(null); }}>
+                  + Spieler für diesen Termin
+                </button>
+              )}
             </div>
+            {addingGuestDate === dateIso && (
+              <div className="gap2" style={{ marginBottom: 10, alignItems: "center" }}>
+                <select value={guestStudentId} onChange={(e) => setGuestStudentId(e.target.value)} style={{ flex: 1 }}>
+                  <option value="">Schüler wählen …</option>
+                  {students.filter((s) => !groupStudents.some((gs) => gs.id === s.id) && !(entry.extra_participants || []).includes(s.id)).map((s) => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+                </select>
+                <button className="btn-primary" style={{ width: "auto", padding: "8px 14px" }} disabled={!guestStudentId}
+                  onClick={() => { onAddExtraParticipant(group.id, dateIso, guestStudentId); setGuestStudentId(""); setAddingGuestDate(null); }}>
+                  Hinzufügen
+                </button>
+              </div>
+            )}
             {isMoving && (
               <div className="gap2" style={{ marginBottom: 10, alignItems: "center" }}>
                 <input type="date" value={moveValue} onChange={(e) => setMoveValue(e.target.value)} style={{ flex: 1 }} />
@@ -1078,13 +1125,22 @@ function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, 
                 )}
               </div>
             )}
-            {!entry.cancelled && (groupStudents.length ? (
+            {!entry.cancelled && (groupStudents.length || (entry.extra_participants || []).length ? (
               <div className="gap2" style={{ flexWrap: "wrap" }}>
                 {groupStudents.map((s) => {
                   const present = !!entry.present[s.id];
                   return (
                     <button key={s.id} className={`pill ${present ? "on" : ""}`} onClick={() => onTogglePresent(group.id, dateIso, s.id)}>
                       {present ? "✓" : "✕"} {s.name}
+                    </button>
+                  );
+                })}
+                {(entry.extra_participants || []).map((id) => {
+                  const s = students.find((st) => st.id === id);
+                  if (!s) return null;
+                  return (
+                    <button key={id} className="pill on" style={{ borderStyle: "dashed" }} onClick={() => onRemoveExtraParticipant(group.id, dateIso, id)} title="Gastspieler entfernen">
+                      🎾 {s.name} ✕
                     </button>
                   );
                 })}
