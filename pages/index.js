@@ -604,7 +604,7 @@ function Dashboard({ session, profile, allProfiles }) {
       <Header profile={profile} allProfiles={allProfiles} viewOwnerId={viewOwnerId} setViewOwnerId={setViewOwnerId} />
       {tab === "training" && (
         <TrainingTab
-          groups={groups} students={students} attendance={attendance}
+          groups={activeGroups} students={students} attendance={attendance}
           groupId={trainingGroupId} setGroupId={setTrainingGroupId}
           year={trainingYear} monthIdx={trainingMonth}
           setYear={setTrainingYear} setMonthIdx={setTrainingMonth}
@@ -921,7 +921,7 @@ function GroupsTab({ groups, students, onAdd, onUpdate, onStartSeason, onDelete,
   const [newExtraDuration, setNewExtraDuration] = useState("");
   const todayIso = isoDate(new Date());
   const currentSeason = seasonOf(todayIso);
-  const seasonChoices = [currentSeason, nextSeasonOf(currentSeason)];
+  const seasonChoices = [currentSeason];
   const [seasonIdx, setSeasonIdx] = useState(0);
   const [showArchive, setShowArchive] = useState(false);
   const [editing, setEditing] = useState(null); // { id, name, weekday, time, duration }
@@ -931,6 +931,8 @@ function GroupsTab({ groups, students, onAdd, onUpdate, onStartSeason, onDelete,
   const latestEnd = seasonal.reduce((m, g) => (g.valid_until > m ? g.valid_until : m), "");
   const sourceGroups = latestEnd ? seasonal.filter((g) => g.valid_until === latestEnd) : [];
   const targetSeason = latestEnd ? nextSeasonOf({ to: latestEnd }) : null;
+  // Neue Saison erst in den letzten 30 Tagen vor ihrem Beginn startbar (Schutz vor Versehen)
+  const inWindow = targetSeason ? targetSeason.from <= isoDate(new Date(Date.now() + 30 * 86400000)) : false;
   const targetExists = targetSeason ? groups.some((g) => g.valid_from === targetSeason.from && !g.is_individual && !g.one_off_date) : false;
   const sourceSeasonName = sourceGroups[0]?.season || "letzte Saison";
 
@@ -1018,11 +1020,7 @@ function GroupsTab({ groups, students, onAdd, onUpdate, onStartSeason, onDelete,
       <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Gruppe anlegen</div>
       <div className="card col">
         <input placeholder="Gruppenname (z. B. Kids Mittwoch)" value={name} onChange={(e) => setName(e.target.value)} />
-        {!oneOff && (
-          <select value={seasonIdx} onChange={(e) => setSeasonIdx(Number(e.target.value))}>
-            {seasonChoices.map((sn, i) => <option key={sn.name} value={i}>{sn.name} (bis {dateLabel(sn.to)})</option>)}
-          </select>
-        )}
+        {!oneOff && <div className="tag">Gilt für: {currentSeason.name} (bis {dateLabel(currentSeason.to)})</div>}
         <label className="row" style={{ cursor: "pointer" }}>
           <span className="tag" style={{ fontSize: 13, textTransform: "none", letterSpacing: 0 }}>Einmaliges Training (z. B. Schnuppertraining)</span>
           <input type="checkbox" style={{ width: "auto" }} checked={oneOff} onChange={(e) => setOneOff(e.target.checked)} />
@@ -1048,7 +1046,7 @@ function GroupsTab({ groups, students, onAdd, onUpdate, onStartSeason, onDelete,
         <div className="tag">Für ein einzelnes Einzeltraining eines Schülers: im Tab „Schüler" direkt beim jeweiligen Schüler anlegen.</div>
       </div>
       <div className="net-divider" />
-      {targetSeason && sourceGroups.length > 0 && !targetExists && (
+      {targetSeason && sourceGroups.length > 0 && !targetExists && inWindow && (
         <>
           <div className="card col" style={{ borderColor: "var(--ball)" }}>
             <div style={{ fontWeight: 500 }}>Neue Saison starten: {targetSeason.name}</div>
