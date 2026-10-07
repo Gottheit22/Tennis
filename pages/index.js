@@ -200,6 +200,7 @@ function Dashboard({ session, profile, allProfiles }) {
   const [invoices, setInvoices] = useState([]);
   const [biller, setBiller] = useState({ name: "", address: "", paymentInfo: "", logoDataUrl: "" });
 
+  const [showPastSeasons, setShowPastSeasons] = useState(false);
   const [trainingGroupId, setTrainingGroupId] = useState(null);
   const [trainingYear, setTrainingYear] = useState(new Date().getFullYear());
   const [trainingMonth, setTrainingMonth] = useState(new Date().getMonth());
@@ -604,7 +605,8 @@ function Dashboard({ session, profile, allProfiles }) {
       <Header profile={profile} allProfiles={allProfiles} viewOwnerId={viewOwnerId} setViewOwnerId={setViewOwnerId} />
       {tab === "training" && (
         <TrainingTab
-          groups={activeGroups} students={students} attendance={attendance}
+          groups={showPastSeasons ? groups : activeGroups} students={students} attendance={attendance}
+          showPast={showPastSeasons} setShowPast={setShowPastSeasons}
           groupId={trainingGroupId} setGroupId={setTrainingGroupId}
           year={trainingYear} monthIdx={trainingMonth}
           setYear={setTrainingYear} setMonthIdx={setTrainingMonth}
@@ -1123,7 +1125,7 @@ function MonthOverview({ groups, students, attendance, year, monthIdx, onSelectG
   );
 }
 
-function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, monthIdx, setYear, setMonthIdx, onToggleCancel, onTogglePresent, onSetMovedDate, onSetDuration, onAddExtraParticipant, onRemoveExtraParticipant }) {
+function TrainingTab({ groups, students, attendance, showPast, setShowPast, groupId, setGroupId, year, monthIdx, setYear, setMonthIdx, onToggleCancel, onTogglePresent, onSetMovedDate, onSetDuration, onAddExtraParticipant, onRemoveExtraParticipant }) {
   const [movingDate, setMovingDate] = useState(null);
   const [moveValue, setMoveValue] = useState("");
   const [editingDuration, setEditingDuration] = useState(null);
@@ -1177,9 +1179,13 @@ function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, 
     <div>
       <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Trainingserfassung</div>
       {viewToggle}
-      <select value={group.id} onChange={(e) => setGroupId(e.target.value)} style={{ marginBottom: 12 }}>
+      <select value={group.id} onChange={(e) => setGroupId(e.target.value)} style={{ marginBottom: 8 }}>
         <GroupOptions groups={groups} />
       </select>
+      <label className="row" style={{ cursor: "pointer", marginBottom: 12 }}>
+        <span className="tag" style={{ fontSize: 12, textTransform: "none", letterSpacing: 0 }}>Vergangene Saisons anzeigen (Korrekturen)</span>
+        <input type="checkbox" style={{ width: "auto" }} checked={!!showPast} onChange={(e) => setShowPast(e.target.checked)} />
+      </label>
       {monthNav}
       <div className="tag" style={{ marginBottom: 12 }}>
         {group.one_off_date ? `Einmaliges Training, ${dateLabel(group.one_off_date)}` : `${WEEKDAYS[group.weekday]}, ${group.time} Uhr`} · {group.duration} Min (Standard) · {groupStudents.length} Schüler
