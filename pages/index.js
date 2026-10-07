@@ -1678,7 +1678,8 @@ function downloadInvoicePdfLetter(inv, biller) {
     const introText = isMultiMonth
       ? `im Zeitraum ${periodLabel(inv)} fanden ${dates.length} Trainingseinheiten statt, und zwar am`
       : `im Monat ${MONTHS[inv.month_idx]} ${inv.year} fanden ${dates.length} Trainingseinheiten statt, und zwar am`;
-    doc.text(introText, 20, y, { maxWidth: 170 }); y += 8;
+    const introLines = doc.splitTextToSize(introText, 170);
+    doc.text(introLines, 20, y); y += introLines.length * 6 + 4;
 
     let lastMonthKey = null;
     dates.forEach((d) => {
