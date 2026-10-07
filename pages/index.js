@@ -28,7 +28,23 @@ function groupLabel(g) {
     const [y, m, day] = g.one_off_date.split("-");
     return `${g.name} — ${day}.${m}.${y}, ${g.time}`;
   }
-  return `${g.name} — ${WEEKDAYS[g.weekday]} ${g.time}`;
+  return `${g.name} — ${WEEKDAYS[g.weekday]} ${g.time}${g.season ? ` · ${g.season}` : ""}`;
+}
+
+// ---- Saisons: Sommer 01.05.–30.09., Winter 01.10.–30.04. (fest) ----
+function seasonOf(iso) {
+  const [y, m] = iso.split("-").map(Number);
+  if (m >= 5 && m <= 9) return { name: `Sommer ${y}`, from: `${y}-05-01`, to: `${y}-09-30` };
+  const wy = m >= 10 ? y : y - 1;
+  return { name: `Winter ${wy}/${String(wy + 1).slice(2)}`, from: `${wy}-10-01`, to: `${wy + 1}-04-30` };
+}
+function nextSeasonOf(season) {
+  const [y, m, d] = season.to.split("-").map(Number);
+  return seasonOf(isoDate(new Date(y, m - 1, d + 1)));
+}
+// Eine Gruppe ist archiviert, wenn ihr Gültigkeitsende in der Vergangenheit liegt.
+function isArchived(g, todayIso) {
+  return !!g.valid_until && g.valid_until < todayIso;
 }
 
 // Prüft, ob ein Schüler an einem bestimmten Datum innerhalb eines erfassten
@@ -93,7 +109,10 @@ function sessionDates(group, year, monthIdx) {
     const [y, m, day] = group.one_off_date.split("-").map(Number);
     if (y === year && m - 1 === monthIdx) base.push(new Date(year, monthIdx, day));
   } else {
-    base.push(...datesForMonth(year, monthIdx, group.weekday));
+    base.push(...datesForMonth(year, monthIdx, group.weekday).filter((d) => {
+      const iso = isoDate(d);
+      return (!group.valid_from || iso >= group.valid_from) && (!group.valid_until || iso <= group.valid_until);
+    }));
   }
   const seen = new Set(base.map((d) => isoDate(d)));
   (group.extra_dates || []).forEach((dateIso) => {
@@ -222,8 +241,9 @@ function Dashboard({ session, profile, allProfiles }) {
 
   useEffect(() => { loadAll(); }, [loadAll]);
   useEffect(() => {
-    if (!trainingGroupId && groups[0]) setTrainingGroupId(groups[0].id);
-    if (!invoiceGroupId && groups[0]) setInvoiceGroupId(groups[0].id);
+    const first = groups.find((g) => !isArchived(g, isoDate(new Date()))) || groups[0];
+    if (!trainingGroupId && first) setTrainingGroupId(first.id);
+    if (!invoiceGroupId && first) setInvoiceGroupId(first.id);
   }, [groups]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- Schüler ----
@@ -241,7 +261,12 @@ function Dashboard({ session, profile, allProfiles }) {
     await supabase.from("students").delete().eq("id", id);
     setStudents((prev) => prev.filter((s) => s.id !== id));
   };
-  const updateStudent = async (id, { name, is_schoolchild, groupIds }) => {
+  const updateStudent = async (id, { name, is_schoolchild, groupIds: shownGroupIds }) => {
+    // Mitgliedschaften in archivierten Gruppen bleiben erhalten (Rechnungen früherer Saisons)
+    const todayIso = isoDate(new Date());
+    const oldStudent = students.find((x) => x.id === id);
+    const archivedKeep = ((oldStudent && oldStudent.group_ids) || []).filter((gid) => { const g = groups.find((x) => x.id === gid); return g && isArchived(g, todayIso); });
+    const groupIds = [...new Set([...shownGroupIds, ...archivedKeep])];
     const { data } = await supabase.from("students").update({ name, is_schoolchild }).eq("id", id).select().maybeSingle();
     await supabase.from("student_groups").delete().eq("student_id", id);
     if (groupIds.length > 0) {
@@ -272,14 +297,41 @@ function Dashboard({ session, profile, allProfiles }) {
   };
 
   // ---- Gruppen ----
-  const addGroup = async (name, weekday, time, duration, oneOffDate, isIndividual) => {
+  const addGroup = async (name, weekday, time, duration, oneOffDate, isIndividual, season) => {
     if (!name.trim()) return null;
-    const { data } = await supabase.from("groups").insert({ name: name.trim(), weekday: oneOffDate ? null : weekday, time, duration, one_off_date: oneOffDate || null, owner_id: writeOwnerId, is_individual: !!isIndividual }).select();
+    const row = { name: name.trim(), weekday: oneOffDate ? null : weekday, time, duration, one_off_date: oneOffDate || null, owner_id: writeOwnerId, is_individual: !!isIndividual };
+    if (season) { row.season = season.name; row.valid_from = season.from; row.valid_until = season.to; }
+    const { data, error } = await supabase.from("groups").insert(row).select();
+    if (error) { alert("Gruppe konnte nicht gespeichert werden: " + error.message); return null; }
     if (data) {
       setGroups((prev) => [...prev, ...data].sort((x, y) => x.name.localeCompare(y.name)));
       return data[0];
     }
     return null;
+  };
+  const updateGroup = async (id, fields) => {
+    const { data, error } = await supabase.from("groups").update(fields).eq("id", id).select().maybeSingle();
+    if (error) { alert("Konnte nicht gespeichert werden: " + error.message); return; }
+    setGroups((prev) => prev.map((g) => (g.id === id ? { ...g, ...(data || fields) } : g)).sort((x, y) => x.name.localeCompare(y.name)));
+  };
+  // Kopiert alle Gruppen der letzten Saison (inkl. Mitglieder) in die nächste Saison.
+  const startSeason = async (sourceGroups, target) => {
+    const newGroups = [];
+    for (const g of sourceGroups) {
+      const { data, error } = await supabase.from("groups").insert({ name: g.name, weekday: g.weekday, time: g.time, duration: g.duration, one_off_date: null, owner_id: g.owner_id, is_individual: false, season: target.name, valid_from: target.from, valid_until: target.to }).select();
+      if (error || !data) { alert("Fehler beim Kopieren: " + (error ? error.message : "unbekannt")); return; }
+      newGroups.push({ src: g, copy: data[0] });
+    }
+    const links = [];
+    newGroups.forEach(({ src, copy }) => {
+      students.filter((st) => (st.group_ids || []).includes(src.id)).forEach((st) => links.push({ student_id: st.id, group_id: copy.id, owner_id: src.owner_id }));
+    });
+    if (links.length > 0) await supabase.from("student_groups").upsert(links, { onConflict: "student_id,group_id", ignoreDuplicates: true });
+    setGroups((prev) => [...prev, ...newGroups.map((n) => n.copy)].sort((x, y) => x.name.localeCompare(y.name)));
+    setStudents((prev) => prev.map((st) => {
+      const add = newGroups.filter(({ src }) => (st.group_ids || []).includes(src.id)).map(({ copy }) => copy.id);
+      return add.length ? { ...st, group_ids: [...(st.group_ids || []), ...add] } : st;
+    }));
   };
   const delGroup = async (id) => {
     await supabase.from("groups").delete().eq("id", id);
@@ -542,6 +594,9 @@ function Dashboard({ session, profile, allProfiles }) {
     setCurrentInvoice((prev) => (prev && prev.id === invoiceId ? null : prev));
   };
 
+  const todayIso = isoDate(new Date());
+  const activeGroups = groups.filter((g) => !isArchived(g, todayIso));
+
   if (!ready) return <div className="wrap"><Header profile={profile} allProfiles={allProfiles} viewOwnerId={viewOwnerId} setViewOwnerId={setViewOwnerId} /><div className="empty">Lade Daten …</div></div>;
 
   return (
@@ -557,10 +612,10 @@ function Dashboard({ session, profile, allProfiles }) {
         />
       )}
       {tab === "schueler" && (
-        <StudentsTab students={students} groups={groups} onAdd={addStudent} onDelete={delStudent} onUpdate={updateStudent} onStartInjury={startInjury} onEndInjury={endInjury} onRemoveInjury={removeInjury} onAddGroup={addGroup} />
+        <StudentsTab students={students} groups={activeGroups} onAdd={addStudent} onDelete={delStudent} onUpdate={updateStudent} onStartInjury={startInjury} onEndInjury={endInjury} onRemoveInjury={removeInjury} onAddGroup={addGroup} />
       )}
       {tab === "gruppen" && (
-        <GroupsTab groups={groups} students={students} onAdd={addGroup} onDelete={delGroup} onAddExtraDate={addExtraDate} onRemoveExtraDate={removeExtraDate} />
+        <GroupsTab groups={groups} students={students} onAdd={addGroup} onUpdate={updateGroup} onStartSeason={startSeason} onDelete={delGroup} onAddExtraDate={addExtraDate} onRemoveExtraDate={removeExtraDate} />
       )}
       {tab === "rechnungen" && (
         <InvoicesTab
@@ -617,6 +672,22 @@ function Nav({ tab, setTab }) {
         <button key={id} className={`nav-btn ${tab === id ? "active" : ""}`} onClick={() => setTab(id)}>{label}</button>
       ))}
     </div></div>
+  );
+}
+
+function GroupOptions({ groups }) {
+  const todayIso = isoDate(new Date());
+  const active = groups.filter((g) => !isArchived(g, todayIso));
+  const archived = groups.filter((g) => isArchived(g, todayIso));
+  return (
+    <>
+      {active.map((g) => <option key={g.id} value={g.id}>{groupLabel(g)}</option>)}
+      {archived.length > 0 && (
+        <optgroup label="Archiv (vergangene Saisons)">
+          {archived.map((g) => <option key={g.id} value={g.id}>{groupLabel(g)}</option>)}
+        </optgroup>
+      )}
+    </>
   );
 }
 
@@ -838,7 +909,7 @@ function EditStudentCard({ student, groups, onSave, onCancel, onAddGroup }) {
   );
 }
 
-function GroupsTab({ groups, students, onAdd, onDelete, onAddExtraDate, onRemoveExtraDate }) {
+function GroupsTab({ groups, students, onAdd, onUpdate, onStartSeason, onDelete, onAddExtraDate, onRemoveExtraDate }) {
   const [name, setName] = useState("");
   const [weekday, setWeekday] = useState(0);
   const [time, setTime] = useState("16:00");
@@ -848,6 +919,20 @@ function GroupsTab({ groups, students, onAdd, onDelete, onAddExtraDate, onRemove
   const [expandedId, setExpandedId] = useState(null);
   const [newExtraDate, setNewExtraDate] = useState("");
   const [newExtraDuration, setNewExtraDuration] = useState("");
+  const todayIso = isoDate(new Date());
+  const currentSeason = seasonOf(todayIso);
+  const seasonChoices = [currentSeason, nextSeasonOf(currentSeason)];
+  const [seasonIdx, setSeasonIdx] = useState(0);
+  const [showArchive, setShowArchive] = useState(false);
+  const [editing, setEditing] = useState(null); // { id, name, weekday, time, duration }
+
+  // Neue Saison starten: Quelle = Gruppen der zuletzt endenden Saison
+  const seasonal = groups.filter((g) => !g.is_individual && !g.one_off_date && g.valid_until);
+  const latestEnd = seasonal.reduce((m, g) => (g.valid_until > m ? g.valid_until : m), "");
+  const sourceGroups = latestEnd ? seasonal.filter((g) => g.valid_until === latestEnd) : [];
+  const targetSeason = latestEnd ? nextSeasonOf({ to: latestEnd }) : null;
+  const targetExists = targetSeason ? groups.some((g) => g.valid_from === targetSeason.from && !g.is_individual && !g.one_off_date) : false;
+  const sourceSeasonName = sourceGroups[0]?.season || "letzte Saison";
 
   const renderGroupCard = (g) => {
     const members = students.filter((s) => (s.group_ids || []).includes(g.id));
@@ -858,7 +943,7 @@ function GroupsTab({ groups, students, onAdd, onDelete, onAddExtraDate, onRemove
         <button className="row" style={{ width: "100%", background: "none", border: "none", cursor: "pointer", textAlign: "left" }} onClick={() => { setExpandedId(expanded ? null : g.id); setNewExtraDate(""); setNewExtraDuration(String(g.duration)); }}>
           <div>
             <div style={{ fontWeight: 500 }}>{g.name}</div>
-            <div className="tag">{g.one_off_date ? `Einmalig, ${dateLabel(g.one_off_date)}` : WEEKDAYS[g.weekday]} · {g.time} Uhr · {g.duration} Min · {members.length} Schüler{extraDates.length > 0 ? ` · ${extraDates.length} Extra-Termin${extraDates.length !== 1 ? "e" : ""}` : ""}</div>
+            <div className="tag">{g.season ? `${g.season} · ` : ""}{g.one_off_date ? `Einmalig, ${dateLabel(g.one_off_date)}` : WEEKDAYS[g.weekday]} · {g.time} Uhr · {g.duration} Min · {members.length} Schüler{extraDates.length > 0 ? ` · ${extraDates.length} Extra-Termin${extraDates.length !== 1 ? "e" : ""}` : ""}</div>
           </div>
           <span className="tag">{expanded ? "▲" : "▼"}</span>
         </button>
@@ -893,14 +978,39 @@ function GroupsTab({ groups, students, onAdd, onDelete, onAddExtraDate, onRemove
                 + Termin
               </button>
             </div>
-            <button className="icon-btn" onClick={() => onDelete(g.id)}>✕ Gruppe löschen</button>
+            {!g.one_off_date && (
+              editing && editing.id === g.id ? (
+                <div className="col" style={{ marginBottom: 10 }}>
+                  <div className="tag">Gruppe bearbeiten (gilt für die ganze Saison dieser Gruppe)</div>
+                  <input value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} />
+                  <div className="gap2">
+                    <select value={editing.weekday} onChange={(e) => setEditing({ ...editing, weekday: Number(e.target.value) })} style={{ flex: 2 }}>
+                      {WEEKDAYS.map((w, i) => <option key={w} value={i}>{w}</option>)}
+                    </select>
+                    <input type="time" value={editing.time} onChange={(e) => setEditing({ ...editing, time: e.target.value })} style={{ flex: 1 }} />
+                  </div>
+                  <div className="gap2" style={{ alignItems: "center" }}>
+                    <input type="number" min="15" step="15" value={editing.duration} onChange={(e) => setEditing({ ...editing, duration: Number(e.target.value) })} />
+                    <span className="tag" style={{ whiteSpace: "nowrap" }}>Minuten</span>
+                  </div>
+                  <div className="gap2">
+                    <button className="btn-primary" onClick={() => { onUpdate(g.id, { name: editing.name.trim() || g.name, weekday: editing.weekday, time: editing.time, duration: editing.duration }); setEditing(null); }}>Speichern</button>
+                    <button className="pill" onClick={() => setEditing(null)}>Abbrechen</button>
+                  </div>
+                </div>
+              ) : (
+                <button className="pill" style={{ marginBottom: 10 }} onClick={() => setEditing({ id: g.id, name: g.name, weekday: g.weekday ?? 0, time: g.time, duration: g.duration })}>✎ Tag / Uhrzeit / Dauer ändern</button>
+              )
+            )}
+            <div><button className="icon-btn" onClick={() => onDelete(g.id)}>✕ Gruppe löschen</button></div>
           </div>
         )}
       </div>
     );
   };
 
-  const regularGroups = groups.filter((g) => !g.is_individual);
+  const regularGroups = groups.filter((g) => !g.is_individual && !isArchived(g, todayIso));
+  const archivedGroups = groups.filter((g) => !g.is_individual && isArchived(g, todayIso));
   const individualGroups = groups.filter((g) => g.is_individual);
 
   return (
@@ -908,6 +1018,11 @@ function GroupsTab({ groups, students, onAdd, onDelete, onAddExtraDate, onRemove
       <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Gruppe anlegen</div>
       <div className="card col">
         <input placeholder="Gruppenname (z. B. Kids Mittwoch)" value={name} onChange={(e) => setName(e.target.value)} />
+        {!oneOff && (
+          <select value={seasonIdx} onChange={(e) => setSeasonIdx(Number(e.target.value))}>
+            {seasonChoices.map((sn, i) => <option key={sn.name} value={i}>{sn.name} (bis {dateLabel(sn.to)})</option>)}
+          </select>
+        )}
         <label className="row" style={{ cursor: "pointer" }}>
           <span className="tag" style={{ fontSize: 13, textTransform: "none", letterSpacing: 0 }}>Einmaliges Training (z. B. Schnuppertraining)</span>
           <input type="checkbox" style={{ width: "auto" }} checked={oneOff} onChange={(e) => setOneOff(e.target.checked)} />
@@ -927,16 +1042,40 @@ function GroupsTab({ groups, students, onAdd, onDelete, onAddExtraDate, onRemove
           <span className="tag" style={{ whiteSpace: "nowrap" }}>Minuten Dauer</span>
         </div>
         <button className="btn-primary" disabled={oneOff && !oneOffDate}
-          onClick={() => { onAdd(name, weekday, time, duration, oneOff ? oneOffDate : null, false); setName(""); setOneOffDate(""); setOneOff(false); }}>
+          onClick={() => { onAdd(name, weekday, time, duration, oneOff ? oneOffDate : null, false, oneOff ? null : seasonChoices[seasonIdx]); setName(""); setOneOffDate(""); setOneOff(false); }}>
           + {oneOff ? "Einmaliges Training" : "Gruppe"} anlegen
         </button>
         <div className="tag">Für ein einzelnes Einzeltraining eines Schülers: im Tab „Schüler" direkt beim jeweiligen Schüler anlegen.</div>
       </div>
       <div className="net-divider" />
+      {targetSeason && sourceGroups.length > 0 && !targetExists && (
+        <>
+          <div className="card col" style={{ borderColor: "var(--ball)" }}>
+            <div style={{ fontWeight: 500 }}>Neue Saison starten: {targetSeason.name}</div>
+            <div className="tag" style={{ textTransform: "none", letterSpacing: 0, fontSize: 13 }}>
+              Kopiert alle {sourceGroups.length} Gruppen aus „{sourceSeasonName}" samt Schülern in die neue Saison (gültig {dateLabel(targetSeason.from)} – {dateLabel(targetSeason.to)}). Danach kannst du bei jeder Gruppe Tag/Uhrzeit ändern und Schüler im Tab „Schüler" umsortieren. Die alten Gruppen und ihre Rechnungen bleiben unverändert im Archiv.
+            </div>
+            <button className="btn-primary" onClick={() => { if (confirm(`Gruppen aus „${sourceSeasonName}" nach „${targetSeason.name}" kopieren?`)) onStartSeason(sourceGroups, targetSeason); }}>
+              ⟳ Neue Saison starten
+            </button>
+          </div>
+          <div className="net-divider" />
+        </>
+      )}
       <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Gruppen ({regularGroups.length})</div>
       {regularGroups.length === 0 && <div className="empty">Noch keine Gruppen angelegt.</div>}
       {regularGroups.map(renderGroupCard)}
 
+      {archivedGroups.length > 0 && (
+        <>
+          <div className="net-divider" />
+          <button className="row" style={{ width: "100%", background: "none", border: "none", cursor: "pointer", marginBottom: 12 }} onClick={() => setShowArchive((v) => !v)}>
+            <span className="disp" style={{ fontSize: 18 }}>Archiv ({archivedGroups.length})</span>
+            <span className="tag">{showArchive ? "▲" : "▼"}</span>
+          </button>
+          {showArchive && archivedGroups.map(renderGroupCard)}
+        </>
+      )}
       {individualGroups.length > 0 && (
         <>
           <div className="net-divider" />
@@ -1041,7 +1180,7 @@ function TrainingTab({ groups, students, attendance, groupId, setGroupId, year, 
       <div className="disp" style={{ fontSize: 18, marginBottom: 12 }}>Trainingserfassung</div>
       {viewToggle}
       <select value={group.id} onChange={(e) => setGroupId(e.target.value)} style={{ marginBottom: 12 }}>
-        {groups.map((g) => <option key={g.id} value={g.id}>{groupLabel(g)}</option>)}
+        <GroupOptions groups={groups} />
       </select>
       {monthNav}
       <div className="tag" style={{ marginBottom: 12 }}>
@@ -1178,7 +1317,7 @@ function InvoicesTab({ groups, biller, onSaveBiller, groupId, setGroupId, fromYe
       <div className="card col">
         {groups.length === 0 ? <div className="tag">Keine Gruppen vorhanden</div> : (
           <select value={activeGroupId} onChange={(e) => setGroupId(e.target.value)}>
-            {groups.map((g) => <option key={g.id} value={g.id}>{groupLabel(g)}</option>)}
+            <GroupOptions groups={groups} />
           </select>
         )}
         {groupInvoices.length > 0 && (
